@@ -9,13 +9,8 @@ import time
 class Scheduler(VLLMScheduler):
     def schedule(self) -> SchedulerOutput:
         """Diffusion fast path:
-<<<<<<< HEAD
-        - Assign 1 placeholder token for requests (zero-prompt friendly) to trigger a single execution.
-        - If no diffusion-eligible requests are scheduled, fall back to the upstream vLLM default scheduler.
-=======
         - For requests with prompt length 0, allocate 1 placeholder token and trigger a single execution.
         - If no requests match the diffusion fast path, fall back to the upstream vLLM default scheduling.
->>>>>>> 4b26d07b46e80191b18daf82e77d4ce907974816
         """
 
         # Select diffusion-eligible requests (zero-prompt friendly; results returned via pooler_output)
