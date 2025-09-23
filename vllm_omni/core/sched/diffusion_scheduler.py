@@ -8,9 +8,9 @@ import time
 
 class Scheduler(VLLMScheduler):
     def schedule(self) -> SchedulerOutput:
-        """扩散快速通道：
-        - prompt 长度为 0 的请求，分配 1 个占位 token，触发一次执行。
-        - 如果未匹配到扩散快速通道请求，退回上游 vLLM 的默认调度。
+        """Diffusion fast path:
+        - For requests with prompt length 0, allocate 1 placeholder token and trigger a single execution.
+        - If no requests match the diffusion fast path, fall back to the upstream vLLM default scheduling.
         """
 
         # 选出零 prompt 且使用 pooling（扩散结果经 pooler_output 回传）的请求
