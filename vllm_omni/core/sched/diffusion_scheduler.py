@@ -1,10 +1,11 @@
 from vllm.v1.core.sched.scheduler import Scheduler as VLLMScheduler
-from vllm.v1.core.sched.scheduler import SchedulerOutput, ModelRunnerOutput, EngineCoreOutputs, EngineCoreOutput, Request, RequestStatus, SpecDecodingStats, defaultdict, Optional
+from vllm.v1.core.sched.scheduler import SchedulerOutput, ModelRunnerOutput, EngineCoreOutputs, Request, RequestStatus, SpecDecodingStats, defaultdict, Optional
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.core.sched.request_queue import create_request_queue
 from vllm.v1.engine import EngineCoreEventType
 from vllm.distributed.kv_events import KVEventBatch
 import time
+from vllm_omni.engine import EngineCoreOutput
 
 class Scheduler(VLLMScheduler):
     def schedule(self) -> SchedulerOutput:
@@ -256,6 +257,7 @@ class Scheduler(VLLMScheduler):
                         kv_transfer_params=kv_transfer_params,
                         num_cached_tokens=request.num_cached_tokens,
                         multimodal_outputs=multimodal_outputs,
+                        output_type=getattr(self.vllm_config.model_config, "engine_output_type", None),
                     ))
 
             else:
