@@ -36,11 +36,13 @@ uv pip install vllm-omni
 # --8<-- [start:build-wheel-from-source]
 
 #### Installation of vLLM
-If you do not need to modify source code of vLLM, you can directly install the stable 0.12.0 release version of the library
+If you need to modify source code of vLLM, you can directly install the stable 0.12.0 release version of the library
 
 ```bash
 uv pip install vllm==0.12.0 --torch-backend=auto
 ```
+
+The release 0.12.0 of vLLM is based on PyTorch 2.9.0 which requires CUDA 12.9 environment.
 
 #### Installation of vLLM-Omni
 Install additional requirements for vLLM-Omni

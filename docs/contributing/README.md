@@ -15,7 +15,7 @@ source .venv/bin/activate
 ```
 ### Development Environment for vLLM
 
-vLLM-Omni is built on top of the stable release 0.12.0 of vLLM. You may install `vllm==0.12.0` directly or install the library from source if you need to check, modify or debug with source code of vLLM.
+vLLM-Omni is quickly evolving, please see the [installation guide](installation/README.md)
 
 The release 0.12.0 of vLLM is based on PyTorch 2.9.0 which requires CUDA 12.9 environment.
 
