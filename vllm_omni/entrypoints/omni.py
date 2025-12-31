@@ -5,13 +5,15 @@ import multiprocessing as mp
 import os
 import time
 import uuid
-from collections.abc import Sequence
+import weakref
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from pprint import pformat
 from typing import Any
 
 from omegaconf import OmegaConf
+from tqdm.auto import tqdm
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 
@@ -38,6 +40,22 @@ from vllm_omni.entrypoints.utils import (
 from vllm_omni.outputs import OmniRequestOutput
 
 logger = init_logger(__name__)
+
+
+def _weak_close_cleanup(stage_list, stage_in_queues, ray_pg):
+    """Weak reference cleanup function for OmniBase instances."""
+    if stage_list:
+        for q in stage_in_queues:
+            try:
+                q.put_nowait(None)
+            except Exception as e:
+                logger.warning(f"Failed to send shutdown signal to stage input queue: {e}")
+        for stage in stage_list:
+            try:
+                stage.stop_stage_worker()
+            except Exception as e:
+                logger.warning(f"Failed to stop stage worker: {e}")
+    try_close_ray(ray_pg)
 
 
 def _dummy_snapshot_download(model_id):
@@ -316,28 +334,8 @@ class OmniBase:
 
     def close(self) -> None:
         """Close all stage processes and clean up resources."""
-        # Close stages if they exist (for LLM models)
-        if self.stage_list:
-            for q in self._stage_in_queues:
-                try:
-                    q.put_nowait(None)
-                except Exception as e:
-                    logger.warning(
-                        f"[{self._name}] Failed to send shutdown signal to stage input queue: {e}",
-                    )
-            for stage in self.stage_list:
-                try:
-                    stage.stop_stage_worker()
-                except Exception as e:
-                    logger.warning(f"[{self._name}] Failed to stop stage worker: {e}")
-
-            try_close_ray(self._ray_pg)
-
-    def __del__(self):  # pragma: no cover - best effort cleanup
-        try:
-            self.close()
-        except Exception:
-            logger.debug(f"[{self._name}] __del__ close() raised", exc_info=True)
+        if hasattr(self, "_weak_finalizer"):
+            self._weak_finalizer()
 
     @property
     def _name(self) -> str:
@@ -379,6 +377,15 @@ class Omni(OmniBase):
 
     def __init__(self, *args: Any, **kwargs: dict[str, Any]) -> None:
         super().__init__(*args, **kwargs)
+
+        # Register weak reference cleanup (called on garbage collection)
+        self._weak_finalizer = weakref.finalize(
+            self,
+            _weak_close_cleanup,
+            self.stage_list,
+            self._stage_in_queues,
+            self._ray_pg,
+        )
 
     def generate(self, *args: Any, **kwargs: dict[str, Any]) -> list[OmniRequestOutput]:
         """Generate outputs for the given prompts.
@@ -430,12 +437,19 @@ class Omni(OmniBase):
                     per_stage_params.append(self.default_sampling_params_list[stage_id])
 
             sampling_params_list = per_stage_params
-        return self._run_generation(prompts, sampling_params_list)
+        try:
+            return self._run_generation(prompts, sampling_params_list)
+        except Exception as e:
+            logger.exception("[Orchestrator] Failed to run generation: %s", e)
+            raise e
+        finally:
+            self.close()
 
     def _run_generation(
         self,
         prompts: PromptType | Sequence[PromptType] | OmniDiffusionRequest | Sequence[OmniDiffusionRequest],
         sampling_params_list: Any | Sequence[Any] | None = None,
+        use_tqdm: bool | Callable[..., tqdm] = True,
     ) -> list[OmniRequestOutput]:
         """Run generation through all stages in the pipeline."""
         logger.debug(f"[{self._name}] generate() called")
@@ -489,6 +503,11 @@ class Omni(OmniBase):
             _wall_start_ts,
         )
 
+        it = request_id_to_prompt.items()
+        if use_tqdm:
+            tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
+            it = tqdm_func(it, desc="Adding requests")
+
         # Seed stage-0 queue with all requests
         logger.debug(f"[{self._name}] Seeding {len(request_prompts)} requests into stage-0")
         # Mark first input time for stage-0
@@ -505,6 +524,15 @@ class Omni(OmniBase):
             _req_start_ts[req_id] = time.time()
             logger.debug(f"[{self._name}] Enqueued request {req_id} to stage-0")
 
+        pbar = None
+        if use_tqdm:
+            tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
+            pbar = tqdm_func(
+                total=len(request_prompts),
+                desc="Processed prompts",
+                dynamic_ncols=True,
+                postfix=(f"est. speed input: {0:.2f} unit/s, output: {0:.2f} unit/s"),
+            )
         # For each stage, forward results to next stage; collect finals at the end
         # We pipeline by continually polling output queues in stage order
         remaining_by_stage: list[int] = [len(request_prompts)] + [0] * (num_stages - 1)
@@ -542,6 +570,25 @@ class Omni(OmniBase):
                     _m = asdict(result.get("metrics"))
                     if _m is not None:
                         metrics.on_stage_metrics(stage_id, req_id, _m)
+                        if pbar:
+                            elapsed = pbar.format_dict["elapsed"] or 1e-6
+                            # Aggregate total tokens/images across all stages
+                            total_out = sum(metrics.stage_total_tokens)
+                            out_spd = total_out / elapsed
+
+                            modality = self.output_modalities[stage_id]
+                            unit = "img" if modality == "image" else "tok"
+
+                            # Pre-calculate for cleaner string formatting
+                            if metrics.e2e_count > 0:
+                                avg_lat = metrics.e2e_total_ms / metrics.e2e_count
+                            else:
+                                avg_lat = 0
+
+                            # Align with vLLM's wording "est. speed" using multi-line parentheses
+                            pbar.postfix = (
+                                f"est. speed stage-{stage_id} {unit}/s: {out_spd:.2f}, avg e2e_lat: {avg_lat:.1f}ms"
+                            )
                 except Exception as e:
                     logger.exception(
                         f"[{self._name}] Failed to process metrics for stage {stage_id}, req {req_id}: {e}",
@@ -620,6 +667,10 @@ class Omni(OmniBase):
                     remaining_by_stage[next_stage_id] += 1
                 else:
                     completed_requests += 1
+                    if pbar:
+                        final_mod = self.output_modalities[final_stage_id_to_prompt[req_id]]
+                        pbar.unit = "img" if final_mod == "image" else "req"
+                        pbar.update(1)
                     logger.debug(
                         f"[{self._name}] Request {req_id} fully completed ({completed_requests}/{total_requests})",
                     )
@@ -627,6 +678,9 @@ class Omni(OmniBase):
             if not made_progress:
                 time.sleep(0.005)
         logger.debug(f"[{self._name}] All requests completed")
+
+        if pbar:
+            pbar.close()
 
         # Summarize and print stats
         try:
