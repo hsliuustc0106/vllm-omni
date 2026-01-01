@@ -312,7 +312,6 @@ class OmniBase:
             # but keep it snappy for fast-loading models.
             if not progressed:
                 time.sleep(0.05)
-                time.sleep(0.05)
 
         # Handle Final State
         if len(self._stages_ready) == num_stages:
@@ -330,15 +329,12 @@ class OmniBase:
             "Verify GPU/device assignment in config (runtime.devices) is correct.",
             "Check GPU/host memory availability; reduce model or batch size if needed.",
             "Check model weights path and network reachability (if loading remotely).",
-            "Increase initialization wait time (stage_init_timeout or call-site timeout)."
+            "Increase initialization wait time (stage_init_timeout or call-site timeout).",
         ]
 
-        formatted_suggestions = "\n".join(f"  {i+1}) {msg}" for i, msg in enumerate(suggestions))
+        formatted_suggestions = "\n".join(f"  {i + 1}) {msg}" for i, msg in enumerate(suggestions))
 
-        logger.error(
-            f"[{self._name}] Stage initialization failed. Troubleshooting Steps:\n"
-            f"{formatted_suggestions}"
-        )
+        logger.error(f"[{self._name}] Stage initialization failed. Troubleshooting Steps:\n{formatted_suggestions}")
 
     def close(self) -> None:
         """Close all stage processes and clean up resources."""
