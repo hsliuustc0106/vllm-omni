@@ -293,7 +293,7 @@ class OmniBase:
         """Wait for all stages to report readiness with optimized polling."""
         num_stages = len(self.stage_list)
         deadline = time.time() + max(0, int(timeout))
-        
+
         logger.info(f"[{self._name}] Waiting for {num_stages} stages to initialize (timeout: {timeout}s)")
 
         while len(self._stages_ready) < num_stages and time.time() < deadline:
@@ -301,7 +301,7 @@ class OmniBase:
             for stage_id, stage in enumerate(self.stage_list):
                 if stage_id in self._stages_ready:
                     continue
-                
+
                 # Check if the stage has reported status
                 if result := stage.try_collect():
                     progressed = True
@@ -311,6 +311,7 @@ class OmniBase:
             # Adaptive backoff: Sleep longer if no progress to save CPU,
             # but keep it snappy for fast-loading models.
             if not progressed:
+                time.sleep(0.05)
                 time.sleep(0.05)
 
         # Handle Final State
@@ -331,9 +332,9 @@ class OmniBase:
             "Check model weights path and network reachability (if loading remotely).",
             "Increase initialization wait time (stage_init_timeout or call-site timeout)."
         ]
-        
+
         formatted_suggestions = "\n".join(f"  {i+1}) {msg}" for i, msg in enumerate(suggestions))
-        
+
         logger.error(
             f"[{self._name}] Stage initialization failed. Troubleshooting Steps:\n"
             f"{formatted_suggestions}"
