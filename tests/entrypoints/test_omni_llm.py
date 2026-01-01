@@ -6,6 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from vllm_omni.entrypoints.stage_utils import SHUTDOWN_TASK
+
 # Suppress noisy DeprecationWarnings from optional Swig bindings imported by vLLM dependencies.
 warnings.filterwarnings(
     "ignore",
@@ -127,7 +129,7 @@ class _FakeStage:
         """Mock stop_stage_worker: clean up queue references."""
         if self._in_q is not None:
             try:
-                self._in_q.put_nowait(None)
+                self._in_q.put_nowait(SHUTDOWN_TASK)
             except Exception:
                 pass
 
@@ -302,7 +304,7 @@ def _setup_log_mocks(monkeypatch):
         def on_stage_metrics(self, stage_id, req_id, metrics):
             pass
 
-        def on_finalize_request(self, stage_id, req_id, engine_outputs, start_ts):
+        def on_finalize_request(self, stage_id, req_id, start_ts):
             self.e2e_done.add(req_id)
 
         def on_forward(self, from_stage, to_stage, req_id, size_bytes, tx_ms, use_shm):
@@ -551,7 +553,7 @@ def test_generate_raises_on_length_mismatch(monkeypatch, fake_stage_config):
 
     omni = Omni(model="any", init_timeout=1)
     with pytest.raises(ValueError):
-        omni.generate(prompts=["hi"], sampling_params_list=[])
+        list(omni.generate(prompts=["hi"], sampling_params_list=[]))
 
 
 def test_generate_pipeline_and_final_outputs(monkeypatch, fake_stage_config):
@@ -638,7 +640,7 @@ def test_generate_pipeline_and_final_outputs(monkeypatch, fake_stage_config):
     # Use dicts instead of object() for serializable sampling params
     sampling_params_list = [{"temperature": 0.7}, {"temperature": 0.8}]
     prompts = ["hi"]
-    outputs = omni.generate(prompts=prompts, sampling_params_list=sampling_params_list)
+    outputs = list(omni.generate(prompts=prompts, sampling_params_list=sampling_params_list))
 
     # Both stages have final_output=True, so should aggregate two OmniRequestOutput
     assert len(outputs) == 2
@@ -721,7 +723,7 @@ def test_generate_no_final_output_returns_empty(monkeypatch, fake_stage_config):
     )
 
     # Use dicts instead of object() for serializable sampling params
-    outputs = omni.generate(prompts=["p"], sampling_params_list=[{"temperature": 0.7}, {"temperature": 0.8}])
+    outputs = list(omni.generate(prompts=["p"], sampling_params_list=[{"temperature": 0.7}, {"temperature": 0.8}]))
     assert outputs == []
 
 
@@ -794,7 +796,7 @@ def test_generate_sampling_params_none_use_default(monkeypatch, fake_stage_confi
         }
     )
     # Use the default sampling params
-    omni.generate(prompts=["p"], sampling_params_list=None)
+    list(omni.generate(prompts=["p"], sampling_params_list=None))
 
 
 def test_wait_for_stages_ready_timeout(monkeypatch, fake_stage_config):
@@ -922,7 +924,7 @@ def test_generate_handles_error_messages(monkeypatch, fake_stage_config):
     # Generate should handle error gracefully (log but continue)
     # Use dict instead of object() for serializable sampling params
     sampling_params_list = [{"temperature": 0.7}]
-    outputs = omni.generate(prompts=["hi"], sampling_params_list=sampling_params_list)
+    outputs = list(omni.generate(prompts=["hi"], sampling_params_list=sampling_params_list))
     # Should return final output (error was logged but didn't stop processing)
     assert isinstance(outputs, list)
     # Since final_output=True, should have one output
@@ -977,7 +979,7 @@ def test_close_sends_shutdown_signal(monkeypatch, fake_stage_config):
     # Use get_nowait to avoid blocking (close() uses put_nowait, so should be safe)
     try:
         shutdown_signal = omni.stage_list[0]._in_q.get_nowait()
-        assert shutdown_signal is None
+        assert shutdown_signal == SHUTDOWN_TASK
     except Empty:
         # If queue was already empty or only had stage_ready, that's also acceptable
         # The important thing is that close() was called without error
