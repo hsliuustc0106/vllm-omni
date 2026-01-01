@@ -307,9 +307,7 @@ class OmniBase:
                     progressed = True
                     if result.get("type") == "stage_ready":
                         self._process_stage_ready(stage, stage_id, result)
-            
-            # Adaptive backoff: Sleep longer if no progress to save CPU,
-            # but keep it snappy for fast-loading models.
+
             if not progressed:
                 time.sleep(0.05)
 
