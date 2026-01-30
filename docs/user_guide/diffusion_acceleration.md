@@ -47,8 +47,9 @@ The following table shows which models are currently supported by each accelerat
 | **Qwen-Image-Edit** | `Qwen/Qwen-Image-Edit` | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Qwen-Image-Edit-2509** | `Qwen/Qwen-Image-Edit-2509` | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Qwen-Image-Layered** | `Qwen/Qwen-Image-Layered` | ❌ | ✅ | ✅ | ✅ | ✅ |
-| **Z-Image** | `Tongyi-MAI/Z-Image-Turbo` | ❌ | ✅ |❌ | ❌ | ❌ |
+| **Z-Image** | `Tongyi-MAI/Z-Image-Turbo` | ✅ | ✅ | ❌ | ❌ | ❌ |
 | **Stable-Diffusion3.5** | `stabilityai/stable-diffusion-3.5` | ❌ | ✅ | ❌ | ❌ | ❌ |
+| **Bagel** | `ByteDance-Seed/BAGEL-7B-MoT` | ✅ | ✅ | ❌ | ❌ | ❌ |
 
 ### VideoGen
 
@@ -95,6 +96,7 @@ To measure the parallelism methods, we run benchmarks with **Qwen/Qwen-Image** m
 
 ```python
 from vllm_omni import Omni
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
 omni = Omni(
     model="Qwen/Qwen-Image",
@@ -102,13 +104,19 @@ omni = Omni(
     cache_config={"rel_l1_thresh": 0.2}  # Optional, defaults to 0.2
 )
 
-outputs = omni.generate(prompt="A cat sitting on a windowsill", num_inference_steps=50)
+outputs = omni.generate(
+    "A cat sitting on a windowsill",
+    OmniDiffusionSamplingParams(
+        num_inference_steps=50,
+    ),
+)
 ```
 
 ### Using Cache-DiT
 
 ```python
 from vllm_omni import Omni
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
 omni = Omni(
     model="Qwen/Qwen-Image",
@@ -122,7 +130,12 @@ omni = Omni(
     }
 )
 
-outputs = omni.generate(prompt="A cat sitting on a windowsill", num_inference_steps=50)
+outputs = omni.generate(
+    "A cat sitting on a windowsill",
+    OmniDiffusionSamplingParams(
+        num_inference_steps=50,
+    ),
+)
 ```
 
 ### Using Ulysses-SP
@@ -130,6 +143,7 @@ outputs = omni.generate(prompt="A cat sitting on a windowsill", num_inference_st
 Run text-to-image:
 ```python
 from vllm_omni import Omni
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.diffusion.data import DiffusionParallelConfig
 ulysses_degree = 2
 
@@ -138,13 +152,17 @@ omni = Omni(
     parallel_config=DiffusionParallelConfig(ulysses_degree=ulysses_degree)
 )
 
-outputs = omni.generate(prompt="A cat sitting on a windowsill", num_inference_steps=50, width=2048, height=2048)
+outputs = omni.generate(
+    "A cat sitting on a windowsill",
+    OmniDiffusionSamplingParams(num_inference_steps=50, width=2048, height=2048),
+)
 ```
 
 
 Run image-to-image:
 ```python
 from vllm_omni import Omni
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.diffusion.data import DiffusionParallelConfig
 ulysses_degree = 2
 
@@ -153,8 +171,13 @@ omni = Omni(
     parallel_config=DiffusionParallelConfig(ulysses_degree=ulysses_degree)
 )
 
-outputs = omni.generate(prompt="turn this cat to a dog",
-        pil_image=input_image, num_inference_steps=50)
+outputs = omni.generate(
+    {
+        "prompt": "turn this cat to a dog",
+        "multi_modal_data": {"image": input_image}
+    },
+    OmniDiffusionSamplingParams(num_inference_steps=50),
+)
 ```
 
 ### Using Ring-Attention
@@ -162,6 +185,7 @@ outputs = omni.generate(prompt="turn this cat to a dog",
 Run text-to-image:
 ```python
 from vllm_omni import Omni
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.diffusion.data import DiffusionParallelConfig
 ring_degree = 2
 
@@ -170,7 +194,10 @@ omni = Omni(
     parallel_config=DiffusionParallelConfig(ring_degree=2)
 )
 
-outputs = omni.generate(prompt="A cat sitting on a windowsill", num_inference_steps=50, width=2048, height=2048)
+outputs = omni.generate(
+    "A cat sitting on a windowsill",
+    OmniDiffusionSamplingParams(num_inference_steps=50, width=2048, height=2048),
+)
 ```
 
 ### Using CFG-Parallel
@@ -181,6 +208,7 @@ CFG-Parallel splits the CFG positive/negative branches across GPUs. Use it when 
 
 ```python
 from vllm_omni import Omni
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.diffusion.data import DiffusionParallelConfig
 cfg_parallel_size = 2
 
@@ -189,8 +217,13 @@ omni = Omni(
     parallel_config=DiffusionParallelConfig(cfg_parallel_size=cfg_parallel_size)
 )
 
-outputs = omni.generate(prompt="turn this cat to a dog",
-        pil_image=input_image, num_inference_steps=50, true_cfg_scale=4.0)
+outputs = omni.generate(
+    {
+        "prompt": "turn this cat to a dog",
+        "multi_modal_data": {"image": input_image}
+    },
+    OmniDiffusionSamplingParams(num_inference_steps=50, true_cfg_scale=4.0),
+)
 ```
 
 ## Documentation

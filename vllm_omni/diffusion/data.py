@@ -258,6 +258,7 @@ class OmniDiffusionConfig:
     # Cache backend configuration (NEW)
     cache_backend: str = "none"  # "tea_cache", "deep_cache", etc.
     cache_config: DiffusionCacheConfig | dict[str, Any] = field(default_factory=dict)
+    enable_cache_dit_summary: bool = False
 
     # Distributed executor backend
     distributed_executor_backend: str = "mp"
@@ -276,12 +277,9 @@ class OmniDiffusionConfig:
     # pipeline_config: PipelineConfig = field(default_factory=PipelineConfig, repr=False)
 
     # LoRA parameters
-    # (Wenxuan) prefer to keep it here instead of in pipeline config to not make it complicated.
     lora_path: str | None = None
-    lora_nickname: str = "default"  # for swapping adapters in the pipeline
-    # can restrict layers to adapt, e.g. ["q_proj"]
-    # Will adapt only q, k, v, o by default.
-    lora_target_modules: list[str] | None = None
+    lora_scale: float = 1.0
+    max_cpu_loras: int | None = None
 
     output_type: str = "pil"
 
@@ -356,6 +354,9 @@ class OmniDiffusionConfig:
 
     # Logging
     log_level: str = "info"
+
+    # Omni configuration (injected from stage config)
+    omni_kv_config: dict[str, Any] = field(default_factory=dict)
 
     def settle_port(self, port: int, port_inc: int = 42, max_attempts: int = 100) -> int:
         """
@@ -443,17 +444,35 @@ class OmniDiffusionConfig:
             # If it's neither dict nor DiffusionCacheConfig, convert to empty config
             self.cache_config = DiffusionCacheConfig()
 
+        if self.max_cpu_loras is None:
+            self.max_cpu_loras = 1
+        elif self.max_cpu_loras < 1:
+            raise ValueError("max_cpu_loras must be >= 1 for diffusion LoRA")
+
     def update_multimodal_support(self) -> None:
         self.supports_multimodal_inputs = self.model_class_name in {"QwenImageEditPlusPipeline"}
 
     @classmethod
     def from_kwargs(cls, **kwargs: Any) -> "OmniDiffusionConfig":
+        # Backwards-compatibility: older callers may use a diffusion-specific
+        # "static_lora_scale" kwarg. Normalize it to the canonical "lora_scale"
+        # before constructing the dataclass to avoid TypeError on unknown fields.
+        if "static_lora_scale" in kwargs:
+            if "lora_scale" not in kwargs:
+                kwargs["lora_scale"] = kwargs["static_lora_scale"]
+            kwargs.pop("static_lora_scale", None)
+
         # Check environment variable as fallback for cache_backend
         # Support both old DIFFUSION_CACHE_ADAPTER and new DIFFUSION_CACHE_BACKEND for backwards compatibility
         if "cache_backend" not in kwargs:
             cache_backend = os.environ.get("DIFFUSION_CACHE_BACKEND") or os.environ.get("DIFFUSION_CACHE_ADAPTER")
             kwargs["cache_backend"] = cache_backend.lower() if cache_backend else "none"
-        return cls(**kwargs)
+
+        # Filter kwargs to only include valid fields
+        valid_fields = {f.name for f in fields(cls)}
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_fields}
+
+        return cls(**filtered_kwargs)
 
 
 @dataclass

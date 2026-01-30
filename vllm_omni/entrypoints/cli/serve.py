@@ -175,6 +175,11 @@ class OmniServeCommand(CLISubcommand):
             default=None,
             help="JSON string of cache configuration (e.g., '{\"rel_l1_thresh\": 0.2}').",
         )
+        omni_config_group.add_argument(
+            "--enable-cache-dit-summary",
+            action="store_true",
+            help="Enable cache-dit summary logging after diffusion forward passes.",
+        )
 
         # VAE memory optimization parameters
         omni_config_group.add_argument(
@@ -207,6 +212,9 @@ class OmniServeCommand(CLISubcommand):
             type=float,
             default=None,
             help="Scheduler flow_shift for video models (e.g., 5.0 for 720p, 12.0 for 480p).",
+        )
+        omni_config_group.add_argument(
+            "--cfg-parallel-size", type=int, default=1, help="Number of GPUs for CFG parallel computation"
         )
         return serve_parser
 
