@@ -70,7 +70,7 @@ Please check out [Contributing to vLLM-Omni](https://vllm-omni.readthedocs.io/en
 
 ## Citation
 
-If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs/2602.02204):
+If you use vLLM-Omni for your research, please cite our [paper](https://arxiv.org/abs/2602.02204):
 
 ```bibtex
 @article{yin2026vllmomni,
