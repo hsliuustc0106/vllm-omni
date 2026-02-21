@@ -1,0 +1,59 @@
+name: VLLM-Omni PR Reviewer
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    # Trigger on @mention in PR comment or description
+    if: |
+      (github.event_name == 'issue_comment' &&
+       contains(github.event.comment.body, '@vllm-omni-reviewer') &&
+       github.event.comment.author_association != 'NONE') ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.body, '@vllm-omni-reviewer'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pygithub httpx
+
+      - name: Get PR details
+        id: pr_details
+        run: |
+          PR_NUMBER="${{ github.event.issue.number || github.event.pull_request.number }}"
+          echo "number=$PR_NUMBER" >> $GITHUB_OUTPUT
+
+      - name: Run PR Reviewer with GLM
+        env:
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr_details.outputs.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          python .github/scripts/pr_reviewer.py
+
+      - name: Upload review artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-output
+          path: /tmp/review_output.md
