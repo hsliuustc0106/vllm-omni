@@ -108,7 +108,7 @@ Review the PR changes and provide structured feedback in the following format:
             }
         ],
         "temperature": 0.3,
-        "max_tokens": 16000
+        "max_tokens": 32000
     }
 
     with httpx.Client(timeout=120.0) as client:
