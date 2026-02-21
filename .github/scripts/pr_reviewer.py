@@ -14,11 +14,18 @@ GLM_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 MODEL = "glm-4.7"  # GLM-4.7 model
 
 def get_pr_diff(repo_name: str, pr_number: int, github_token: str) -> str:
-    """Fetch PR diff using GitHub API."""
-    gh = Github(github_token)
-    repo = gh.get_repo(repo_name)
-    pr = repo.get_pull(pr_number)
-    return pr.diff()
+    """Fetch PR diff using GitHub API with raw Accept header."""
+    # Use raw GitHub API since PyGithub doesn't provide a diff() method
+    url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}"
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "Accept": "application/vnd.github.v3.diff"
+    }
+
+    with httpx.Client(timeout=30.0) as client:
+        response = client.get(url, headers=headers)
+        response.raise_for_status()
+        return response.text
 
 def get_pr_context(repo_name: str, pr_number: int, github_token: str) -> dict:
     """Fetch PR metadata and context."""
