@@ -13,11 +13,14 @@ jobs:
   review:
     # Only trigger on @mention in PR comments (not PR descriptions to avoid re-runs on every push)
     # Note: issue_comment events fire for both issues and PRs, so we must check pull_request != null
+    # Restrict to members/collaborators to control API costs
     if: |
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request != null &&
       contains(github.event.comment.body, '@vllm-omni-reviewer') &&
-      github.event.comment.author_association != 'NONE'
+      (github.event.comment.author_association == 'MEMBER' ||
+       github.event.comment.author_association == 'COLLABORATOR' ||
+       github.event.comment.author_association == 'OWNER')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
