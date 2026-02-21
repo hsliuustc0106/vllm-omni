@@ -27,9 +27,8 @@ def get_pr_diff(repo_name: str, pr_number: int, github_token: str) -> str:
         response.raise_for_status()
         return response.text
 
-def get_pr_context(repo_name: str, pr_number: int, github_token: str) -> dict:
+def get_pr_context(gh: Github, repo_name: str, pr_number: int) -> dict:
     """Fetch PR metadata and context."""
-    gh = Github(github_token)
     repo = gh.get_repo(repo_name)
     pr = repo.get_pull(pr_number)
 
@@ -118,13 +117,10 @@ Review the PR changes and provide structured feedback in the following format:
         result = response.json()
         return result["choices"][0]["message"]["content"]
 
-def post_review_comment(repo_name: str, pr_number: int, body: str, github_token: str):
+def post_review_comment(gh: Github, repo_name: str, pr_number: int, body: str):
     """Post review as a comment on the PR."""
-    gh = Github(github_token)
     repo = gh.get_repo(repo_name)
     pr = repo.get_pull(pr_number)
-
-    # Create issue comment
     pr.create_issue_comment(body)
 
 def main():
@@ -161,10 +157,13 @@ def main():
 
     print(f"Reviewing PR #{pr_number} in {repo_name}...")
 
+    # Create GitHub client once (reuse for all API calls)
+    gh = Github(github_token)
+
     # Get PR diff and context
     print("Fetching PR details...")
     diff = get_pr_diff(repo_name, pr_number, github_token)
-    context = get_pr_context(repo_name, pr_number, github_token)
+    context = get_pr_context(gh, repo_name, pr_number)
 
     # Truncate diff if too large (max 50k chars for prompt)
     truncated_diff = diff[:50000]
@@ -198,7 +197,7 @@ Please review this PR considering vLLM architecture, multi-modal integration pat
 
         # Post as comment
         print("Posting review comment...")
-        post_review_comment(repo_name, pr_number, review, github_token)
+        post_review_comment(gh, repo_name, pr_number, review)
 
         print("Review completed successfully!")
 
@@ -210,7 +209,6 @@ Please review this PR considering vLLM architecture, multi-modal integration pat
         print(traceback.format_exc())
 
         # Post generic error message to PR (publicly visible, no sensitive info)
-        gh = Github(github_token)
         repo = gh.get_repo(repo_name)
         pr = repo.get_pull(pr_number)
         pr.create_issue_comment(
