@@ -203,12 +203,20 @@ Please review this PR considering vLLM architecture, multi-modal integration pat
         print("Review completed successfully!")
 
     except Exception as e:
+        # Log full error details to Actions console (only visible to repo members/admins)
+        import traceback
         print(f"Error during review: {e}")
-        # Post error comment
+        print("Full traceback:")
+        print(traceback.format_exc())
+
+        # Post generic error message to PR (publicly visible, no sensitive info)
         gh = Github(github_token)
         repo = gh.get_repo(repo_name)
         pr = repo.get_pull(pr_number)
-        pr.create_issue_comment(f" PR Reviewer encountered an error: {str(e)}")
+        pr.create_issue_comment(
+            "PR Reviewer encountered an error. "
+            "Please check the Actions logs for details."
+        )
         sys.exit(1)
 
 if __name__ == "__main__":
