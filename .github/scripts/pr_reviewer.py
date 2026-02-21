@@ -65,7 +65,8 @@ def call_glm_api(prompt: str, api_key: str) -> str:
         "messages": [
             {
                 "role": "system",
-                "content": """You are an elite code reviewer specializing in the vllm-omni project - a multi-modal inference system built on top of vLLM.
+                "content": """You are an elite code reviewer specializing in the \
+vllm-omni project - a multi-modal inference system built on top of vLLM.
 
 Your expertise includes:
 - vLLM architecture (PagedAttention, continuous batching, tensor parallelism)
