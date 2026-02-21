@@ -123,11 +123,33 @@ def post_review_comment(repo_name: str, pr_number: int, body: str, github_token:
 def main():
     api_key = os.environ.get("GLM_API_KEY")
     github_token = os.environ.get("GITHUB_TOKEN")
-    pr_number = int(os.environ.get("PR_NUMBER"))
+    pr_number_str = os.environ.get("PR_NUMBER")
     repo_name = os.environ.get("REPO")
 
-    if not all([api_key, github_token, pr_number, repo_name]):
-        print("Error: Missing required environment variables")
+    # Debug: print environment variables status
+    print(f"DEBUG: GLM_API_KEY={'***' if api_key else 'MISSING'}")
+    print(f"DEBUG: GITHUB_TOKEN={'***' if github_token else 'MISSING'}")
+    print(f"DEBUG: PR_NUMBER={pr_number_str}")
+    print(f"DEBUG: REPO={repo_name}")
+
+    # Validate all required variables
+    if not api_key:
+        print("Error: GLM_API_KEY environment variable is missing")
+        sys.exit(1)
+    if not github_token:
+        print("Error: GITHUB_TOKEN environment variable is missing")
+        sys.exit(1)
+    if not pr_number_str:
+        print("Error: PR_NUMBER environment variable is missing")
+        sys.exit(1)
+    if not repo_name:
+        print("Error: REPO environment variable is missing")
+        sys.exit(1)
+
+    try:
+        pr_number = int(pr_number_str)
+    except ValueError:
+        print(f"Error: PR_NUMBER is not a valid integer: {pr_number_str}")
         sys.exit(1)
 
     print(f"Reviewing PR #{pr_number} in {repo_name}...")
