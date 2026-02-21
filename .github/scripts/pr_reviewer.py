@@ -19,10 +19,7 @@ def get_pr_diff(repo_name: str, pr_number: int, github_token: str) -> str:
     """Fetch PR diff using GitHub API with raw Accept header."""
     # Use raw GitHub API since PyGithub doesn't provide a diff() method
     url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}"
-    headers = {
-        "Authorization": f"Bearer {github_token}",
-        "Accept": "application/vnd.github.v3.diff"
-    }
+    headers = {"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3.diff"}
 
     with httpx.Client(timeout=30.0) as client:
         response = client.get(url, headers=headers)
@@ -38,13 +35,15 @@ def get_pr_context(gh: Github, repo_name: str, pr_number: int) -> dict:
     # Get changed files
     files = []
     for file in pr.get_files():
-        files.append({
-            "filename": file.filename,
-            "status": file.status,
-            "additions": file.additions,
-            "deletions": file.deletions,
-            "patch": file.patch[:5000] if file.patch else ""  # Truncate for context
-        })
+        files.append(
+            {
+                "filename": file.filename,
+                "status": file.status,
+                "additions": file.additions,
+                "deletions": file.deletions,
+                "patch": file.patch[:5000] if file.patch else "",  # Truncate for context
+            }
+        )
 
     return {
         "number": pr.number,
@@ -59,10 +58,7 @@ def get_pr_context(gh: Github, repo_name: str, pr_number: int) -> dict:
 
 def call_glm_api(prompt: str, api_key: str) -> str:
     """Call GLM API for code review."""
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
     payload = {
         "model": MODEL,
@@ -105,15 +101,12 @@ Review the PR changes and provide structured feedback in the following format:
 [Suggestions for additional tests]
 
 ### Overall Assessment
-[Your recommendation: Approve / Request Changes / Needs Major Work]"""
+[Your recommendation: Approve / Request Changes / Needs Major Work]""",
             },
-            {
-                "role": "user",
-                "content": prompt
-            }
+            {"role": "user", "content": prompt},
         ],
         "temperature": 0.3,
-        "max_tokens": 32000
+        "max_tokens": 32000,
     }
 
     with httpx.Client(timeout=120.0) as client:
