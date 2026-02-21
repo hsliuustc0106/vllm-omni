@@ -41,7 +41,7 @@ jobs:
         id: pr_details
         run: |
           PR_NUMBER="${{ github.event.issue.number || github.event.pull_request.number }}"
-          echo "number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
       - name: Run PR Reviewer with GLM
         env:

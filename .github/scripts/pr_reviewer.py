@@ -2,6 +2,7 @@
 """
 PR Reviewer using GLM API for vllm-omni project.
 """
+
 import os
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ from github import Github
 # Configuration
 GLM_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 MODEL = "glm-4.7"  # GLM-4.7 model
+
 
 def get_pr_diff(repo_name: str, pr_number: int, github_token: str) -> str:
     """Fetch PR diff using GitHub API with raw Accept header."""
@@ -26,6 +28,7 @@ def get_pr_diff(repo_name: str, pr_number: int, github_token: str) -> str:
         response = client.get(url, headers=headers)
         response.raise_for_status()
         return response.text
+
 
 def get_pr_context(gh: Github, repo_name: str, pr_number: int) -> dict:
     """Fetch PR metadata and context."""
@@ -50,8 +53,9 @@ def get_pr_context(gh: Github, repo_name: str, pr_number: int) -> dict:
         "author": pr.user.login,
         "base": pr.base.ref,
         "head": pr.head.ref,
-        "files": files
+        "files": files,
     }
+
 
 def call_glm_api(prompt: str, api_key: str) -> str:
     """Call GLM API for code review."""
@@ -118,11 +122,13 @@ Review the PR changes and provide structured feedback in the following format:
         result = response.json()
         return result["choices"][0]["message"]["content"]
 
+
 def post_review_comment(gh: Github, repo_name: str, pr_number: int, body: str):
     """Post review as a comment on the PR."""
     repo = gh.get_repo(repo_name)
     pr = repo.get_pull(pr_number)
     pr.create_issue_comment(body)
+
 
 def main():
     api_key = os.environ.get("GLM_API_KEY")
@@ -172,15 +178,15 @@ def main():
     # Build prompt for GLM
     prompt = f"""Review this pull request:
 
-**PR Title**: {context['title']}
-**Author**: {context['author']}
-**Branch**: {context['head']} -> {context['base']}
+**PR Title**: {context["title"]}
+**Author**: {context["author"]}
+**Branch**: {context["head"]} -> {context["base"]}
 
 **Description**:
-{context['body'] or 'No description provided'}
+{context["body"] or "No description provided"}
 
 **Files Changed**:
-{chr(10).join(f"- {f['filename']} ({f['status']}: +{f['additions']} -{f['deletions']})" for f in context['files'])}
+{chr(10).join(f"- {f['filename']} ({f['status']}: +{f['additions']} -{f['deletions']})" for f in context["files"])}
 
 **Full Diff**:
 {truncated_diff}
@@ -205,6 +211,7 @@ Please review this PR considering vLLM architecture, multi-modal integration pat
     except Exception as e:
         # Log full error details to Actions console (only visible to repo members/admins)
         import traceback
+
         print(f"Error during review: {e}")
         print("Full traceback:")
         print(traceback.format_exc())
@@ -212,11 +219,9 @@ Please review this PR considering vLLM architecture, multi-modal integration pat
         # Post generic error message to PR (publicly visible, no sensitive info)
         repo = gh.get_repo(repo_name)
         pr = repo.get_pull(pr_number)
-        pr.create_issue_comment(
-            "PR Reviewer encountered an error. "
-            "Please check the Actions logs for details."
-        )
+        pr.create_issue_comment("PR Reviewer encountered an error. Please check the Actions logs for details.")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
