@@ -166,6 +166,9 @@ def main():
     diff = get_pr_diff(repo_name, pr_number, github_token)
     context = get_pr_context(repo_name, pr_number, github_token)
 
+    # Truncate diff if too large (max 50k chars for prompt)
+    truncated_diff = diff[:50000]
+
     # Build prompt for GLM
     prompt = f"""Review this pull request:
 
@@ -180,7 +183,7 @@ def main():
 {chr(10).join(f"- {f['filename']} ({f['status']}: +{f['additions']} -{f['deletions']})" for f in context['files'])}
 
 **Full Diff**:
-{diff[:50000]}  # Truncate if too large
+{truncated_diff}
 
 Please review this PR considering vLLM architecture, multi-modal integration patterns, performance, and code quality."""
 
