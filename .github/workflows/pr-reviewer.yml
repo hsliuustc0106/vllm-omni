@@ -14,8 +14,10 @@ permissions:
 jobs:
   review:
     # Trigger on @mention in PR comment or description
+    # Note: issue_comment events fire for both issues and PRs, so we must check pull_request != null
     if: |
       (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
        contains(github.event.comment.body, '@vllm-omni-reviewer') &&
        github.event.comment.author_association != 'NONE') ||
       (github.event_name == 'pull_request' &&
