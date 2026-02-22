@@ -50,7 +50,7 @@ jobs:
           PR_REVIEWER_COOLDOWN_MINUTES: 5
           PR_REVIEWER_MAX_RETRIES: 3
         run: |
-          python .github/scripts/pr_reviewer.py 2>&1 | tee /tmp/pr_review_${PR_NUMBER}.log
+          python .github/scripts/pr_reviewer.py 2>&1 | tee "/tmp/pr_review_${PR_NUMBER}.log"
 
       - name: Upload review logs
         if: always()
