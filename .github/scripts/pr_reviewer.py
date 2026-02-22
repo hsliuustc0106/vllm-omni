@@ -57,7 +57,9 @@ class GitHubComment(TypedDict):
 
 # Configuration
 TRIGGER_PHRASE: str = "@vllm-omni-reviewer"
-DEFAULT_GLM_API_URL: str = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+DEFAULT_GLM_API_URL: str = (
+    "https://open.bigmodel.cn/api/paas/v4/chat/completions"  # noqa: E501
+)
 DEFAULT_GLM_MODEL: str = "glm-4.7"
 DEFAULT_COOLDOWN_MINUTES: int = 5
 DEFAULT_MAX_RETRIES: int = 3
@@ -92,13 +94,23 @@ def get_config() -> Config:
         glm_api_url=os.getenv("GLM_API_URL", DEFAULT_GLM_API_URL),
         glm_model=os.getenv("GLM_MODEL", DEFAULT_GLM_MODEL),
         cooldown_minutes=int(
-            os.getenv("PR_REVIEWER_COOLDOWN_MINUTES", str(DEFAULT_COOLDOWN_MINUTES))
+            os.getenv(
+                "PR_REVIEWER_COOLDOWN_MINUTES",
+                str(DEFAULT_COOLDOWN_MINUTES),
+            )
         ),
-        max_retries=int(os.getenv("PR_REVIEWER_MAX_RETRIES", str(DEFAULT_MAX_RETRIES))),
+        max_retries=int(
+            os.getenv(
+                "PR_REVIEWER_MAX_RETRIES",
+                str(DEFAULT_MAX_RETRIES),
+            )
+        ),
         retry_delay=float(
             os.getenv("PR_REVIEWER_RETRY_DELAY", str(DEFAULT_RETRY_DELAY))
         ),
-        max_diff_size=int(os.getenv("PR_REVIEWER_MAX_DIFF_SIZE", str(MAX_DIFF_SIZE))),
+        max_diff_size=int(
+            os.getenv("PR_REVIEWER_MAX_DIFF_SIZE", str(MAX_DIFF_SIZE))
+        ),  # noqa: E501
     )
 
 
@@ -136,7 +148,10 @@ def check_trigger(comment_body: str) -> bool:
 
 
 def fetch_pr_diff(
-    repo_name: str, pr_number: int, token: str, max_size: int = MAX_DIFF_SIZE
+    repo_name: str,
+    pr_number: int,
+    token: str,
+    max_size: int = MAX_DIFF_SIZE,
 ) -> Optional[str]:
     """
     Fetch the diff for a pull request.
@@ -164,8 +179,9 @@ def fetch_pr_diff(
         diff: str = response.text
         if len(diff) > max_size:
             logger.warning(
-                f"Diff size ({len(diff)} bytes) exceeds maximum ({max_size} bytes), "
-                f"truncating to first {max_size} bytes"
+                f"Diff size ({len(diff)} bytes) exceeds maximum "
+                f"({max_size} bytes), truncating to first "
+                f"{max_size} bytes"
             )
             return diff[:max_size] + "\n\n... [Diff truncated due to size] ..."
         logger.info(f"Successfully fetched diff ({len(diff)} bytes)")
@@ -176,7 +192,11 @@ def fetch_pr_diff(
         return None
 
 
-def fetch_pr_details(repo_name: str, pr_number: int, token: str) -> Optional[PRDetails]:
+def fetch_pr_details(
+    repo_name: str,
+    pr_number: int,
+    token: str,
+) -> Optional[PRDetails]:
     """
     Fetch PR details including title and description.
 
@@ -313,7 +333,9 @@ def validate_glm_response(data: Dict[str, Any]) -> Optional[str]:
 
         if "message" not in first_choice:
             logger.error("GLM API choice missing 'message' field")
-            logger.error(f"Choice structure: {json.dumps(first_choice, indent=2)}")
+            logger.error(
+                f"Choice structure: {json.dumps(first_choice, indent=2)}"
+            )  # noqa: E501
             return None
 
         message = first_choice["message"]
@@ -373,21 +395,27 @@ def call_glm_api(prompt: str, api_key: str, config: Config) -> Optional[str]:
                 f"{attempt + 1}/{config.max_retries}"
             )
             response = requests.post(
-                config.glm_api_url, headers=headers, json=payload, timeout=120
+                config.glm_api_url,
+                headers=headers,
+                json=payload,
+                timeout=120,
             )
 
             if response.status_code == 200:
                 data = response.json()
                 review = validate_glm_response(data)
                 if review:
-                    logger.info(f"Successfully received review ({len(review)} chars)")
+                    logger.info(
+                        f"Successfully received review ({len(review)} chars)"
+                    )  # noqa: E501
                     return review
                 else:
                     last_error = "Failed to validate API response structure"
                     logger.error(last_error)
             else:
                 last_error = (
-                    f"GLM API request failed: {response.status_code} - {response.text}"
+                    f"GLM API request failed: {response.status_code} - "
+                    f"{response.text}"
                 )
                 logger.error(last_error)
 
@@ -404,15 +432,21 @@ def call_glm_api(prompt: str, api_key: str, config: Config) -> Optional[str]:
         # Exponential backoff before retry
         if attempt < config.max_retries - 1:
             wait_time: float = config.retry_delay * (2**attempt)
-            logger.info(f"Waiting {wait_time}s before retry...")
+            logger.info(f"Waiting {wait_time}s before retry...")  # noqa: E501
             time.sleep(wait_time)
 
-    logger.error(f"All {config.max_retries} attempts failed. Last error: {last_error}")
+    logger.error(
+        f"All {config.max_retries} attempts failed. "
+        f"Last error: {last_error}"  # noqa: E501
+    )
     return None
 
 
-def check_cooldown(
-    repo_name: str, pr_number: int, token: str, cooldown_minutes: int
+def check_cooldown(  # noqa: E501
+    repo_name: str,
+    pr_number: int,
+    token: str,
+    cooldown_minutes: int,
 ) -> bool:
     """
     Check if the PR is within the cooldown period.
@@ -428,7 +462,10 @@ def check_cooldown(
     """
     from datetime import datetime, timedelta
 
-    url: str = f"https://api.github.com/repos/{repo_name}/issues/{pr_number}/comments"
+    url: str = (
+        f"https://api.github.com/repos/{repo_name}/issues/"
+        f"{pr_number}/comments"  # noqa: E501
+    )
     headers: Dict[str, str] = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github.v3+json",
@@ -439,12 +476,15 @@ def check_cooldown(
 
     if response.status_code != 200:
         logger.warning(
-            f"Failed to check cooldown: {response.status_code}, proceeding with review"
+            f"Failed to check cooldown: {response.status_code}, "
+            f"proceeding with review"
         )
         return False
 
     comments: List[Dict[str, Any]] = response.json()
-    cutoff_time: datetime = datetime.utcnow() - timedelta(minutes=cooldown_minutes)
+    cutoff_time: datetime = datetime.utcnow() - timedelta(
+        minutes=cooldown_minutes
+    )  # noqa: E501
 
     for comment in reversed(comments):
         # Check if this is a bot comment
@@ -459,19 +499,25 @@ def check_cooldown(
                 created_at = created_at.replace(tzinfo=None)
                 if created_at > cutoff_time:
                     logger.info(
-                        f"PR is within cooldown period (last review: {created_at_str})"
+                        f"PR is within cooldown period "
+                        f"(last review: {created_at_str})"
                     )
                     return True
             except ValueError:
-                logger.warning(f"Failed to parse comment timestamp: {created_at_str}")
+                logger.warning(
+                    f"Failed to parse comment timestamp: {created_at_str}"
+                )  # noqa: E501
                 continue
 
     logger.info("PR is outside cooldown period, proceeding with review")
     return False
 
 
-def post_review_comment(
-    repo_name: str, pr_number: int, token: str, review: str
+def post_review_comment(  # noqa: E501
+    repo_name: str,
+    pr_number: int,
+    token: str,
+    review: str,
 ) -> bool:
     """
     Post the review as a comment on the PR.
@@ -485,7 +531,10 @@ def post_review_comment(
     Returns:
         True if posting succeeded, False otherwise.
     """
-    url: str = f"https://api.github.com/repos/{repo_name}/issues/{pr_number}/comments"
+    url: str = (
+        f"https://api.github.com/repos/{repo_name}/issues/"
+        f"{pr_number}/comments"  # noqa: E501
+    )
     headers: Dict[str, str] = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github.v3+json",
@@ -551,7 +600,8 @@ def main() -> int:
     # Check if the comment contains the trigger phrase
     if not check_trigger(comment_body):
         logger.info(
-            f"Comment does not contain trigger phrase '{TRIGGER_PHRASE}', exiting"
+            f"Comment does not contain trigger phrase "
+            f"'{TRIGGER_PHRASE}', exiting"  # noqa: E501
         )
         return 0
 
@@ -564,7 +614,9 @@ def main() -> int:
 
     # Fetch PR details
     logger.info("Step 1/4: Fetching PR details...")
-    pr_details: Optional[PRDetails] = fetch_pr_details(repo_name, pr_number, token)
+    pr_details: Optional[PRDetails] = fetch_pr_details(
+        repo_name, pr_number, token
+    )  # noqa: E501
     if not pr_details:
         logger.error("Failed to fetch PR details")
         return 1
