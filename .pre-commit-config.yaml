@@ -27,3 +27,7 @@ repos:
     hooks:
       - id: flake8
         args: ["--max-line-length=88", "--extend-ignore=E203,W503"]
+
+# Local hooks for project-specific scripts
+# The PR reviewer script is checked by pre-commit when modified
+# To check manually: pre-commit run --files .github/scripts/pr_reviewer.py
