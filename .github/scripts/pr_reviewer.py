@@ -58,7 +58,7 @@ class GitHubComment(TypedDict):
 # Configuration
 TRIGGER_PHRASE: str = "@vllm-omni-reviewer"
 DEFAULT_GLM_API_URL: str = "https://open.bigmodel.cn/api/paas/v4/chat/completions"  # noqa: E501
-DEFAULT_GLM_MODEL: str = "glm-4.7"
+DEFAULT_GLM_MODEL: str = "glm-5"
 DEFAULT_COOLDOWN_MINUTES: int = 5
 DEFAULT_MAX_RETRIES: int = 3
 DEFAULT_RETRY_DELAY: float = 1.0
