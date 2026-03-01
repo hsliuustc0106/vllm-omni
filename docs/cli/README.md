@@ -40,3 +40,13 @@ vllm bench serve --omni \
 ```
 
 See [vllm bench serve](./bench/serve.md) for the full reference of all available arguments.
+
+## Stage Based CLI
+
+vLLM-Omni supports multi-stage inference architecture through Stage Based CLI. This allows complex multi-modal models to be split into independent stages that can run on different GPUs with independent configurations.
+
+See [Stage Based CLI Guide](./stage_based_cli.md) for detailed documentation on:
+- Single stage deployment
+- CLI parameters
+- Configuration file format
+- Distributed deployment
