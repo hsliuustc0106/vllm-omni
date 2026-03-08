@@ -327,6 +327,9 @@ def ulysses_attention_on_test_model(
     attn_backend: str,
 ):
     """Run Ulysses attention test on a test model and save results for comparison."""
+    # FIX: Force platform initialization in spawned process (fixes #1705)
+    _ = current_omni_platform.device_type  # Trigger lazy initialization
+    
     # Use fixed seed for reproducibility across baseline and SP runs
     RANDOM_SEED = 42
     current_omni_platform.seed_everything(RANDOM_SEED)
