@@ -115,20 +115,23 @@ def slow_ar_to_dac_decoder_async_chunk(
             }
         return None
 
-    in_initial_phase = initial_chunk_size > 0 and length <= chunk_size
+    in_initial_phase = initial_chunk_size > 0 and initial_chunk_size < chunk_size and length < chunk_size
 
     if in_initial_phase:
-        already_sent = transfer_manager.put_req_chunk[request_id] * initial_chunk_size
-        pending = length - already_sent
-        if pending <= 0:
+        if not finished and length % initial_chunk_size != 0:
             return None
-        if pending < initial_chunk_size and not finished:
-            return None
-        context_length = min(pending, initial_chunk_size)
+        context_length = (
+            length % initial_chunk_size if (finished and length % initial_chunk_size != 0) else initial_chunk_size
+        )
         left_context_size = max(0, length - context_length)
         window_frames = transfer_manager.code_prompt_token_ids[request_id][:length]
     else:
-        initial_coverage = (chunk_size // initial_chunk_size) * initial_chunk_size if initial_chunk_size > 0 else 0
+        # Match Qwen3-TTS transition semantics: once we hit the first full
+        # chunk boundary, switch to normal chunk_size cadence instead of
+        # emitting one more "initial" chunk at the exact chunk_size boundary.
+        initial_coverage = (
+            ((chunk_size - 1) // initial_chunk_size) * initial_chunk_size if 0 < initial_chunk_size < chunk_size else 0
+        )
         adjusted = length - initial_coverage
         chunk_length = adjusted % chunk_size
         if chunk_length != 0 and not finished:
