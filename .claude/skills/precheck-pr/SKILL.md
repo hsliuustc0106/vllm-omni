@@ -63,6 +63,8 @@ If multiple rows apply (e.g., a diffusion model is also a new model), union the 
 
 Ask: "Quick mode or full mode?" Then walk the checklist for the detected PR type from [references/checklists.md](references/checklists.md). Each item produces ✓, ✗, or ⚠.
 
+**Also run the Code-Quality sweep on every PR**, regardless of type or mode: the three diff-scoped checks (kwargs fragility, broad-except swallow, `Any`/wrong type hints) in [references/code-quality.md](references/code-quality.md). These count only lines the PR *adds* — the pre-existing backlog across the repo is out of scope.
+
 ### Step 5: Print Report
 
 ```
@@ -74,6 +76,7 @@ Pre-check report for <branch>
   Dimension          Result
   ─────────────────  ──────
   PR title format    ✓
+  Code quality       ⚠ 1 broad except, 2 Any hints
   PR desc integrity  ✓
   Registry/config    ✓
   Dead code          ⚠ 2 warnings

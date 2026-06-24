@@ -35,6 +35,18 @@ PR title must follow the project convention documented in `docs/contributing/REA
 
 ---
 
+## All PRs: Code Quality (run on every PR, quick & full)
+
+Diff-scoped sweep for three fragility patterns that are pervasive in the existing codebase — **only lines the PR adds count**, not the pre-existing backlog. Detection commands, codebase examples, and full severity rules live in [code-quality.md](code-quality.md).
+
+- [ ] **No new `**kwargs` string-lookup plumbing:** the diff adds no `**kwargs` + `kwargs["..."]` / `kwargs.get("...")` / `"..." in kwargs`. ⚠ any new instance; ✗ if a new string key is duplicated across ≥2 files without a shared constant, or unknown keys are silently dropped on a fail-fast path.
+- [ ] **No new broad exception swallow:** the diff adds no `except Exception:` / bare `except:`. ⚠ any new instance; ✗ for `except: pass` / `except Exception: return None` / `continue` on a fail-fast path (init, config validation, weight loading, request handling).
+- [ ] **No new `Any` / wrong type hints:** the diff adds no `: Any` / `-> Any` / untyped production signature, and no new `SimpleNamespace` in tests faking an object that already has a real typed stub. ⚠ any new instance; ✗ for a *wrong* (actively misleading) annotation or a `SimpleNamespace` test fake of a typed object.
+
+Roll the ⚠/✗ counts into the report as a single **Code quality** dimension row.
+
+---
+
 ## Bug Fix PRs
 
 ### Quick
@@ -49,7 +61,7 @@ PR title must follow the project convention documented in `docs/contributing/REA
 - [ ] **Regression test exists:** `git diff --name-only` includes at least one `tests/` file
 - [ ] **Regression test reproduces the original error:** the test would fail on main, pass on this branch
 - [ ] **Fix matches root cause exactly:** no "fix the symptom + something else" — if the root cause is dtype, the fix is dtype, not dtype + reformatting
-- [ ] **No silent failure risk:** no bare `except: pass`, no `try: ... except: return None`, no empty fallback added
+- [ ] **No silent failure risk:** no bare `except: pass`, no `try: ... except: return None`, no empty fallback added. See the broad-except pattern in [code-quality.md](code-quality.md#2-broad-exception-swallow) for the full severity rule (⚠ any new broad catch; ✗ for a swallow on a fail-fast path).
 - [ ] **Upstream pattern match:** the fix follows the same pattern as existing code for similar cases (grep for analogous `from_pretrained` calls, etc.)
 - [ ] **Environment documented:** torch/transformers/vllm versions listed if the bug is version-dependent
 
