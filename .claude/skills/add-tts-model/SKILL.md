@@ -485,6 +485,8 @@ full `pre-commit run` invocation for a TTS model:
 
 Use this checklist when integrating a new TTS model:
 
+> **Validation vs. precheck-pr:** registry / `__init__` consistency, docs completeness, dead-code / copy-paste / import-hygiene, accuracy + benchmark evidence, PR-title format, and rebase are all owned by the [precheck-pr](../precheck-pr/SKILL.md) gate in **Before Opening the PR** below. The items here track build completion and TTS-specific correctness only.
+
 ### Cross-Cutting Invariants (verify at end of every phase)
 - [ ] I1: `forward()` docstring states cumulative vs delta; consolidation path audited end-to-end
 - [ ] I2: Tests / examples / benchmarks never use `dict.get(a) or dict.get(b)` on tensor values; list form handled
@@ -498,7 +500,7 @@ Use this checklist when integrating a new TTS model:
 - [ ] Reference audio samples saved for comparison
 
 ### Phase 2: Stage Separation
-- [ ] Model registered in `registry.py`
+- [ ] Model registered in `registry.py` — precheck-pr then verifies the entry count and `__init__.py` exports match
 - [ ] Config classes created with `model_type` registration
 - [ ] Stage 0 (AR) implemented and generates correct tokens
 - [ ] Stage 1 (Decoder) produces correct audio from tokens — dtype float32 for codec decoder
@@ -510,8 +512,8 @@ Use this checklist when integrating a new TTS model:
 - [ ] Streaming: per-request state keyed by request ID (not shared across requests)
 - [ ] Streaming: codec tensors moved to codec decoder device before decode
 - [ ] Stage config YAML created
-- [ ] `end2end.py` produces audio matching reference quality
-- [ ] README.md written
+- [ ] `end2end.py` produces audio matching reference quality — PR-level accuracy + benchmark evidence is checked by precheck-pr
+- [ ] README.md written — precheck-pr validates docs consistency vs the diff
 
 ### Phase 3: Online Serving
 - [ ] All 5 `serving_speech.py` integration points added in one commit
@@ -523,7 +525,7 @@ Use this checklist when integrating a new TTS model:
 - [ ] E2E tests added per model priority tier (see **Test Case Writing (CI Levels)**)
 - [ ] Buildkite entries match level: `test-ready.yml` / `test-merge.yml` or nightly TTS job / `test-nightly.yml`
 - [ ] Gradio demo working
-- [ ] Documentation added (offline + online docs, nav, supported models)
+- [ ] Documentation added (offline + online docs, nav, supported models) — precheck-pr validates completeness vs the diff
 
 ### Phase 4: Async Chunk
 - [ ] Stage config updated with `async_chunk: true`
@@ -546,9 +548,7 @@ Use this checklist when integrating a new TTS model:
 - [ ] Details and failure-recovery commands: [references/precommit-dco.md](references/precommit-dco.md)
 
 ### Before Opening the PR
-- [ ] Run the [precheck-pr skill](../precheck-pr/SKILL.md) in **full** mode — covers the New Model checklist, dead-code scan, copy-paste / import-hygiene checks, accuracy + benchmark evidence, and a diff-scoped Code-Quality sweep
-- [ ] PR title has the `[Model]` prefix and the model name (e.g. `[Model] Add <ModelName> TTS support`)
-- [ ] Branch is rebased on `origin/main` (watch for `serving_speech.py` conflicts)
+- [ ] Run the [precheck-pr skill](../precheck-pr/SKILL.md) in **full** mode — covers the New Model checklist (registry / `__init__` consistency, docs), dead-code scan, copy-paste / import-hygiene checks, accuracy + benchmark evidence, a diff-scoped Code-Quality sweep, the `[Model] Add <ModelName> TTS support` title format, and rebase on `origin/main` (watch for `serving_speech.py` conflicts)
 
 ## References
 
