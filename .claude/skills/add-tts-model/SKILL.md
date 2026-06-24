@@ -545,6 +545,11 @@ Use this checklist when integrating a new TTS model:
 - [ ] `git config user.email` matches the email registered on your GitHub account
 - [ ] Details and failure-recovery commands: [references/precommit-dco.md](references/precommit-dco.md)
 
+### Before Opening the PR
+- [ ] Run the [precheck-pr skill](../precheck-pr/SKILL.md) in **full** mode — covers the New Model checklist, dead-code scan, copy-paste / import-hygiene checks, accuracy + benchmark evidence, and a diff-scoped Code-Quality sweep
+- [ ] PR title has the `[Model]` prefix and the model name (e.g. `[Model] Add <ModelName> TTS support`)
+- [ ] Branch is rebased on `origin/main` (watch for `serving_speech.py` conflicts)
+
 ## References
 
 In-skill references (details split out of the main body):

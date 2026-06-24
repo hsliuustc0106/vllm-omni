@@ -620,6 +620,12 @@ See the [Profiling Single-Stage Diffusion](../../../docs/contributing/profiling.
 7. **Cache-DiT before parallelism tuning**: Cache-DiT is lossy — verify quality at baseline before combining with parallelism
 8. **Combine lossless + lossy**: e.g., TP + SP + Cache-DiT for maximum throughput
 
+## Before Opening a PR
+
+Run the [precheck-pr skill](../precheck-pr/SKILL.md) for a self-review against project conventions before pushing. Use **full** mode for a new diffusion model — it runs the New Model / Diffusion Model checklists (registry entries vs claimed count, `__init__.py` exports matching the registry, dead-code scan, copy-paste detection, import hygiene, accuracy + benchmark evidence) plus a diff-scoped Code-Quality sweep. **Quick** mode is enough for a small follow-up fix.
+
+It also validates the PR-title prefix (`[Model] Add <ModelName> ...`) and that the branch is rebased on `origin/main`.
+
 ## Reference Files
 
 - [vllm-omni-test skill](../vllm-omni-test/SKILL.md) — L1–L4 markers, naming, Buildkite wiring, run commands
