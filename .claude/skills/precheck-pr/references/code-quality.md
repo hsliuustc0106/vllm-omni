@@ -1,6 +1,6 @@
 # Code-Quality Patterns
 
-Three fragility patterns to sweep on **every** PR, in both quick and full mode. These are pervasive in the existing codebase (hundreds of pre-existing sites) — so the checks are **diff-scoped**: only lines the PR *adds* count. Whole-repo greps light up every PR with the backlog and are useless.
+Five fragility patterns to sweep on **every** PR, in both quick and full mode. These are pervasive in the existing codebase (hundreds of pre-existing sites) — so the checks are **diff-scoped**: only lines the PR *adds* count. Whole-repo greps light up every PR with the backlog and are useless.
 
 All commands assume:
 ```bash
@@ -112,6 +112,69 @@ Replace `Any` with the concrete type, a `Protocol`, or a `Union`. If a type is g
 
 ---
 
+## 4. Unnecessary copy — `.clone()` / `copy.deepcopy` in hot paths
+
+### Anti-pattern
+```python
+# Per-step in a diffusion/AR loop: clones the full latent every iteration
+for t in timesteps:
+    trajectory_latents.append(x_t.clone())   # O(N) GPU alloc + memcpy each step
+```
+Real clusters: `vllm_omni/diffusion/models/bagel/bagel_transformer.py` calls `x_t.clone()` ~9× across a trajectory loop (lines 1820–2186); the cache hooks `vllm_omni/diffusion/cache/teacache/hook.py:155` and `magcache/hook.py:182` clone `hidden_states` per step. Separately, `copy.deepcopy(self.scheduler)` / `copy.deepcopy(req.sampling_params)` is copy-pasted across diffusion pipelines — `pipeline_qwen_image.py:786`, `pipeline_hunyuan_image3.py:1904`, `pipeline_ltx2*.py` (×3), `pipeline_dreamzero.py:1085`, `diffusion_model_runner.py:398` — a full object-graph deepcopy on the request path. (Contrast `dreamzero/causal_wan_model.py:203`, which carries a `# No .clone() needed.` comment — the aware pattern.)
+
+### Why dangerous
+A `.clone()` of a GPU tensor or a `copy.deepcopy` of a config object inside a per-step / per-request path is a hidden allocator: it reads as one Python line but triggers a GPU memcpy or a deep object-graph walk every iteration. Across 50 diffusion steps or hundreds of AR steps it dominates latency and VRAM bandwidth. `deepcopy` additionally ignores any custom device / `__copy__` logic and can drag tensors through CPU.
+
+### Severity
+- ⚠ any *new* `.clone()` / `.copy_()` / `copy.deepcopy(...)` inside a per-step loop or per-request path.
+- ✗ for `.clone()` of a full latent/activations tensor inside an AR or diffusion step loop without an explanatory comment, or `copy.deepcopy` of a scheduler / sampling-config on the request hot path.
+
+### Detect (diff-scoped)
+```bash
+git diff ${BASE}...HEAD -- "*.py" | grep "^+[^+]" \
+  | grep -E '\.clone\(\)|\.copy_\(|copy\.deepcopy|deepcopy\('
+```
+
+### Fix
+Tensors: prefer a view (`x[..., :k]`, `torch.narrow`, `as_strided`) or write into a pre-allocated buffer with `dst.copy_(src)` instead of `.clone()`; if the caller no longer needs the original, `move`/`del` it rather than copy. Schedulers / configs: build a fresh lightweight instance per request, or split out the mutable per-request bits so the shared immutable part isn't deepcopied. If a copy is genuinely required (e.g. the source is mutated in place later), keep it and add a one-line comment saying why.
+
+---
+
+## 5. Blocking the asyncio event loop / lock held across `await`
+
+### Anti-pattern
+```python
+# BLOCKER-prone: blocking sleep / blocking HTTP / lock held across an await,
+# all inside an async (event-loop) function
+async def handle(self, req):
+    with self._lock:
+        resp = await self._client.call(req)   # lock held across await -> serializes all requests
+    time.sleep(0.1)                           # stalls the single loop for every concurrent request
+```
+
+### Why dangerous
+vLLM-Omni serves over a single asyncio event loop. Any synchronous blocking work on an `async def` path — `time.sleep`, blocking HTTP (`requests`/`urllib`), heavy CPU work, or a lock held across an `await` — stalls the loop for *every* concurrent request, not just the blocking one. A lock held across `await` silently serializes the whole pipeline; blocking I/O tanks throughput and inflates tail latency.
+
+### Severity
+- ⚠ any *new* `time.sleep(`, blocking HTTP call (`requests.get/post`, `urllib.request`, `urlopen`), or `await` inside a `with Lock` / `async with` critical section, in `async def` code.
+- ✗ for `time.sleep` or blocking HTTP on the serving path (`engine/`, `entrypoints/`, async `connectors/`), or a lock acquired and held across an `await` on the request path.
+
+### Detect (diff-scoped)
+```bash
+# New blocking primitives introduced by the diff — then eyeball whether each
+# sits in an async function on the loop vs a dedicated worker thread:
+git diff ${BASE}...HEAD -- "*.py" | grep "^+[^+]" \
+  | grep -E 'time\.sleep|requests\.(get|post|put|delete)|urllib\.request|urlopen'
+# Lock acquired with an await potentially inside the critical section (manual eyeball):
+git diff ${BASE}...HEAD -- "*.py" | grep "^+[^+]" | grep -E 'async with|\.acquire\(\)'
+```
+Note: blocking inside a **dedicated worker thread is correct** — the repo already does this (`diffusion/model_loader/hub_prefetch.py`, `distributed/omni_connectors/kv_transfer_manager.py`, the `mooncake`/`mori` connectors poll with `time.sleep` on their own threads). The check targets the *event-loop* path only.
+
+### Fix
+Move blocking work off the loop with `asyncio.to_thread(...)` / `run_in_executor`, or use a native async client (`httpx.AsyncClient` / `aiohttp`). Never `await` while holding a lock — drop the lock before the `await` and re-acquire after, or restructure so the critical section contains no `await`.
+
+---
+
 ## Running the sweep
 
-Run all three detections against `${BASE}...HEAD`, then for each hit decide ⚠ vs ✗ using the severity rules above. Roll the results into the report as a single **Code quality** dimension row (count of ⚠ and ✗), alongside the type-specific checklist from [checklists.md](checklists.md).
+Run all five detections against `${BASE}...HEAD`, then for each hit decide ⚠ vs ✗ using the severity rules above. Roll the results into the report as a single **Code quality** dimension row (count of ⚠ and ✗), alongside the type-specific checklist from [checklists.md](checklists.md).
