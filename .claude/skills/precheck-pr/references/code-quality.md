@@ -4,8 +4,7 @@ Five fragility patterns to sweep on **every** PR, in both quick and full mode. T
 
 All commands assume:
 ```bash
-BASE=$(git merge-base HEAD origin/main)
-ADDED='git diff ${BASE}...HEAD -- "*.py" | grep "^+[^+]"'
+BASE="$(git merge-base HEAD origin/main)"
 ```
 
 **Severity:** ⚠ for any *new* instance introduced by the diff; ✗ for the acute sub-cases defined per pattern. Acute ✗ findings belong in the report's blocking count.
