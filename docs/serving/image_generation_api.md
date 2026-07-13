@@ -138,7 +138,7 @@ Content-Type: application/json
 | `model` | string | server's model | Model to use (optional, should match server if specified) |
 | `n` | integer | 1 | Number of images to generate (1-10) |
 | `size` | string | model defaults | Image dimensions in WxH format (e.g., "1024x1024", "512x512") |
-| `response_format` | string | "b64_json" | Response format (only "b64_json" supported) |
+| `response_format` | string | "b64_json" | Response format: "b64_json" returns JSON with base64 data; "file" returns the generated image as a file response. |
 | `user` | string | null | User identifier for tracking |
 
 #### vllm-omni Extension Parameters

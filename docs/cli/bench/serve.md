@@ -55,7 +55,7 @@ You can use `vllm bench serve --omni --help=all` to get descriptions of all para
                     'Allowed metric names are "ttft", "tpot", "itl", "ttfc", "tpoc", "icl", '
                     '"tpop", "e2el", "audio_ttfp", "audio_rtf", "audio_duration". '
 
-- `-print-stage`
+- `--print-stage`
 Print per-stage benchmark metrics for --omni serving when stage metrics are returned by the server. Disabled by default.
 
 - `--save-result`
@@ -312,7 +312,7 @@ vllm bench serve \
   --ignore-eos \
   --percentile-metrics ttft,tpot,itl \
   --random-output-len 2 \
-  --extra_body '{"modalities": ["text"]}'
+  --extra-body '{"modalities": ["text"]}'
 ```
 
 If successful, you will see the following output:
@@ -390,7 +390,7 @@ vllm bench serve --omni \
   --ignore-eos \
   --percentile-metrics ttft,tpot,itl,e2el,audio_ttfp,audio_rtf,ttfc,tpoc,icl \
   --random-output-len 900 \
-  --extra_body '{"modalities": ["text","audio"]}' \
+  --extra-body '{"modalities": ["text","audio"]}' \
   --print-stage
 ```
 
