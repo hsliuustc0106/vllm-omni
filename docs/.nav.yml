@@ -94,6 +94,9 @@ nav:
     - contributing/README.md
     - glob: contributing/*
       flatten_single_child_sections: true
+      ignore:
+        - README.md
+        - DOCS_GUIDE.md
   - Model Implementation:
     - contributing/model/README.md
     - contributing/model/adding_omni_model.md
@@ -117,7 +120,6 @@ nav:
       - design/feature/cache_dit.md
       - design/feature/teacache.md
       - design/feature/async_chunk.md
-      - design/feature/vae_parallel.md
       - design/feature/diffusion_step_execution.md
       - design/feature/diffusion_request_level_batching.md
       - design/feature/diffusion_continuous_batching.md
