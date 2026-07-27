@@ -252,6 +252,37 @@ def test_save_async_uses_confirmed_tokens_for_async_scheduler_watermark(build_ad
     assert len(adapter._pending_save_reqs) == 1
 
 
+def test_send_single_request_terminal_chunk_still_flushes_processor(build_adapter, monkeypatch):
+    """A terminal stop is not a segment boundary (#5383), but the producer-side
+    processor must still receive the flush signal on the terminal chunk.
+    Passing only ``is_segment_finished`` starved processors of their final
+    accumulated payload once terminal stops stopped setting it (#5413: the
+    downstream stage got ``meta.finished`` with the tail data missing).
+    """
+    adapter, connector = build_adapter(stage_id=0)
+    request = _req("req-terminal", RequestStatus.FINISHED_STOPPED, external_req_id="ext-terminal")
+
+    seen_flush_flags = []
+
+    def recording_processor(**kwargs):
+        seen_flush_flags.append(kwargs["is_finished"])
+        return OmniPayloadStruct(
+            codes=CodesStruct(audio=torch.tensor([1, 2, 3], dtype=torch.long)),
+        )
+
+    adapter.custom_process_next_stage_input_func = recording_processor
+    monkeypatch.setattr(adapter, "cleanup", lambda *a, **kw: None)
+
+    adapter._send_single_request(
+        {"multimodal_output": None, "request": request, "is_finished": True, "is_segment_finished": False}
+    )
+
+    assert seen_flush_flags == [True]
+    sent_payload = connector.put.call_args.kwargs["data"]
+    assert bool(sent_payload.meta.finished.item()) is True
+    assert bool(sent_payload.meta.is_segment_finished.item()) is False
+
+
 def test_send_single_request_struct_without_meta_does_not_crash(build_adapter, monkeypatch):
     """Producer may return a struct with ``meta=None`` (e.g. payload that
     carries only ``embed`` or ``codes``). The sender's ``meta is not None``
