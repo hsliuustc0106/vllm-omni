@@ -1274,6 +1274,9 @@ class DiffusionOutput:
     finished: bool = True
     chunk_index: int = 0
     total_chunks: int = 1
+    started_event_ids: list[str] = field(default_factory=list)
+    active_event_ids: list[str] = field(default_factory=list)
+    completed_event_ids: list[str] = field(default_factory=list)
 
     # logged duration of stages
     stage_durations: dict[str, float] = field(default_factory=dict)
