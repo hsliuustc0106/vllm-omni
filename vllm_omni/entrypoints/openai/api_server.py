@@ -1572,8 +1572,9 @@ async def delete_voice(name: str, raw_request: Request):
 async def streaming_speech(websocket: WebSocket):
     """WebSocket endpoint for streaming text input TTS.
 
-    Accepts text incrementally, splits at sentence boundaries, and
-    returns audio per sentence. See serving_speech_stream.py for protocol.
+    Accepts text incrementally and returns audio for the buffered text on
+    input.done, which flushes without closing the connection. See
+    serving_speech_stream.py for protocol.
     """
     handler = getattr(websocket.app.state, "openai_streaming_speech", None)
     if handler is None:
