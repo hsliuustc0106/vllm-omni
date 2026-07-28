@@ -1830,10 +1830,17 @@ async def generate_images(
                     status_code=generation_result.error.code if generation_result.error else 400,
                     content=generation_result.model_dump(),
                 )
-            flat_images, _, _, _ = generation_result
+            flat_images, stage_durations, peak_memory_mb, _ = generation_result
             image_data = [ImageData(b64_json=encode_image_base64(img), revised_prompt=None) for img in flat_images]
 
-            return ImageGenerationResponse(created=int(time.time()), data=image_data)
+            return ImageGenerationResponse(
+                created=int(time.time()),
+                data=image_data,
+                metrics={
+                    "stage_durations": stage_durations or None,
+                    "peak_memory_mb": float(peak_memory_mb) if peak_memory_mb else None,
+                },
+            )
 
         # Build params - pass through user values directly
         prompt: OmniTextPrompt = {"prompt": request.prompt, "modalities": ["image"]}
@@ -1899,7 +1906,7 @@ async def generate_images(
 
         logger.debug(f"Generating {request.n} image(s) {size_str}")
 
-        # Generate images using AsyncOmni (multi-stage mode)
+        # Generate images using AsyncOmni.
         result = await _generate_with_async_omni(
             engine_client=engine_client,
             gen_params=gen_params,
@@ -1929,10 +1936,16 @@ async def generate_images(
             for img in images
         ]
 
+        stage_durations = getattr(result, "stage_durations", None)
+        peak_memory_mb = getattr(result, "peak_memory_mb", None)
         response_kwargs = {
             "created": int(time.time()),
             "data": image_data,
             "output_format": output_format,
+            "metrics": {
+                "stage_durations": stage_durations or None,
+                "peak_memory_mb": float(peak_memory_mb) if peak_memory_mb else None,
+            },
         }
         if request.size:
             response_kwargs["size"] = size_str
