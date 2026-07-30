@@ -465,6 +465,13 @@ class AsyncOmniEngine:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                logger.warning(
+                    "[AsyncOmniEngine] Orchestrator startup timed out after %ss. "
+                    "Multi-stage deployments that initialize stages sequentially on one device "
+                    "or load checkpoints from slow storage may need larger --init-timeout and "
+                    "--stage-init-timeout values.",
+                    startup_timeout,
+                )
                 self._try_shutdown("[AsyncOmniEngine] Failed to cleanup after orchestrator startup timeout")
                 raise TimeoutError(f"Orchestrator did not become ready within {startup_timeout}s")
             try:
