@@ -3,6 +3,9 @@
 Read this reference when tests change, a risky production path has no test, or
 a test-only PR may not prove the intended behavior.
 
+Official docs: [test system overview](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/ci/test_system_overview/)
+and [test writing guide](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/ci/test_writing_guide/).
+
 ## Static proof check
 
 For each changed semantic path, ask whether the test would fail if that behavior

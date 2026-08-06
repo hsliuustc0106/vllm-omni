@@ -3,6 +3,9 @@
 Read this reference when a change crosses module boundaries or alters
 configuration, orchestration, runtime ownership, connectors, or shared state.
 
+Official docs: [architecture overview](https://docs.vllm.ai/projects/vllm-omni/en/latest/design/architecture_overview/)
+and [design documents](https://docs.vllm.ai/projects/vllm-omni/en/latest/design/).
+
 ## Source of truth
 
 Prefer matching documents under `docs/design/module/**` on the reviewed branch.

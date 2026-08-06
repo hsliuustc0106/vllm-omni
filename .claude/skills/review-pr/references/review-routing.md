@@ -4,6 +4,10 @@ Use this reference after the diff census. Select only the rows supported by the
 changed files and claims; one primary domain plus one cross-cutting domain is
 usually enough.
 
+Official docs: [design documents](https://docs.vllm.ai/projects/vllm-omni/en/latest/design/),
+[model contribution guides](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/model/),
+and [feature compatibility](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/feature_compatibility/).
+
 | Signal | Load | Optional repo-local skill |
 | --- | --- | --- |
 | Config, orchestration, connector, scheduler, cache, or cross-stage change | [architecture.md](architecture.md), then [blocker-patterns.md](blocker-patterns.md) if a risk signal appears | [`precheck-pr` code-quality patterns](../../precheck-pr/references/code-quality.md) |

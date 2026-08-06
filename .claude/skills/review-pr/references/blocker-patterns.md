@@ -4,6 +4,9 @@ Use this catalog only for risks introduced or exposed by the diff. A pattern is
 not a finding until a reachable trigger, impact, and smallest safe fix are
 proved; existing backlog is not review scope.
 
+Official docs: [contributing guide](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/)
+and [feature compatibility](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/feature_compatibility/).
+
 | Signal | Prove before reporting |
 | --- | --- |
 | Bare or broad exception handling | An expected failure is hidden, converted to a false success, or loses actionable context on init, config, loading, request, or execution paths. |

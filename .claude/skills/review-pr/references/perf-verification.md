@@ -3,6 +3,9 @@
 Activate this reference only when the PR claims or intentionally changes
 latency, throughput, memory, scaling, precision, or output quality.
 
+Official docs: [profiling](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/profiling/)
+and [serving benchmarks](https://docs.vllm.ai/projects/vllm-omni/en/latest/cli/bench/serve/).
+
 ## Comparable A/B contract
 
 Compare frozen base and head with the same:

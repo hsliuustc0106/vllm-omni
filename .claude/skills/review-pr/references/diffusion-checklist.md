@@ -3,6 +3,10 @@
 Read this reference for diffusion pipeline, model, scheduler, latent, cache,
 parallelism, offload, quantization, or serving changes.
 
+Official docs: [adding a diffusion model](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/model/adding_diffusion_model/),
+[diffusion features](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/diffusion_features/),
+and [feature compatibility](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/feature_compatibility/).
+
 ## Integration closure
 
 - Align the pipeline registry, architecture/model identifier, exports, config,

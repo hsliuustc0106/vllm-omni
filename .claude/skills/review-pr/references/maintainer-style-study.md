@@ -4,6 +4,8 @@ Use this reference only when turning proved findings into comments. The baseline
 maintainer samples favor short, direct comments and reserve long explanations
 for architecture or non-obvious failure paths.
 
+Official docs: [contributing and review process](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/).
+
 ## Write the finding
 
 - Lead with the issue or decisive question; omit a review preamble.

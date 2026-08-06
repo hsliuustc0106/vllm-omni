@@ -44,6 +44,12 @@ Read [review-execution.md](references/review-execution.md) for every review.
 After the diff census, read [review-routing.md](references/review-routing.md),
 then load only the references selected for the changed behavior:
 
+Each concise reference links to the maintained
+[vLLM-Omni documentation](https://docs.vllm.ai/projects/vllm-omni/en/latest/).
+For branch-specific behavior, inspect the matching `docs/` file in the reviewed
+checkout first; use the published latest docs for current guidance and discovery.
+If docs and live code disagree, verify the code/tests and report the drift.
+
 | Reference | Read when |
 | --- | --- |
 | [architecture.md](references/architecture.md) | Ownership, configuration, orchestration, connector, or cross-stage boundaries change. |

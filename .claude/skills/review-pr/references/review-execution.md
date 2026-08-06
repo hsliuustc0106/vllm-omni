@@ -3,6 +3,9 @@
 Use this reference for every review. It defines snapshot collection, gates,
 validation records, delivery permissions, maintainer tone, and re-review.
 
+Official docs: [contributing guide](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/)
+and [CI failure triage](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/ci/failures/).
+
 ## Contents
 
 - [Freeze the review surface](#freeze-the-review-surface)

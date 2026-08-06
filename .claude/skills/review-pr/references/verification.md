@@ -4,6 +4,9 @@ Read this reference when a runnable affected path and suitable local or remote
 hardware are available. Never claim device evidence from static analysis or a
 simulated backend.
 
+Official docs: [installation](https://docs.vllm.ai/projects/vllm-omni/en/latest/getting_started/installation/)
+and [test execution guide](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/ci/test_execution_guide/).
+
 ## Choose the narrowest level
 
 | Available environment | Verification |

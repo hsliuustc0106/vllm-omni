@@ -3,6 +3,11 @@
 Read this reference when a PR adds or expands a model architecture, pipeline,
 loader, processor, registry entry, or stage configuration.
 
+Official docs: [model contribution guides](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/model/),
+[adding an omni model](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/model/adding_omni_model/),
+[adding a TTS model](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/model/adding_tts_model/),
+and [supported models](https://docs.vllm.ai/projects/vllm-omni/en/latest/models/supported_models/).
+
 ## Match claims to the diff
 
 - Reconcile every claimed architecture, modality, variant, feature, and example
