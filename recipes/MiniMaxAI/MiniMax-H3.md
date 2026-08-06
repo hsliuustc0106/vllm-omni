@@ -12,26 +12,33 @@
 - Maintainer: Community
 
 MiniMax H3 is a CFG-distilled joint video/audio diffusion transformer. Its
-checkpoint has two independently served partitions:
+checkpoint has two task-specific DiT partitions:
 
 - `FL2VA`: text-to-video+audio (`t2va`) and first-frame-to-video+audio
   (`fl2va`)
 - `Ref2VA`: up to 9 images, 3 videos, and 3 audio references in supported
   image/video/audio combinations (`ref2va`; audio-only is rejected)
 
+One vLLM-Omni diffusion stage can load both DiTs while instantiating the
+tokenizer, processor, Qwen3-VL text encoder, video VAE, and audio VAE only
+once. Requests select the DiT with `extra_params.task`.
+
 The generated MP4 contains H.264 video and synchronized stereo audio.
 
 ## Prerequisites
 
-The checkpoint requires Hugging Face access approval. Download it and point
-`MODEL_ROOT` at the directory containing the `FL2VA` and `Ref2VA`
-subdirectories:
+The checkpoint requires Hugging Face access approval. Authenticate once;
+`vllm serve` downloads the required components automatically:
 
 ```bash
 hf auth login
-export MODEL_ROOT=/path/to/MiniMax-H3
-hf download MiniMaxAI/MiniMax-H3 --local-dir "${MODEL_ROOT}"
+export MODEL=MiniMaxAI/MiniMax-H3
 ```
+
+The vLLM-Omni pipeline downloads `FL2VA/**`, `Ref2VA/model_index.json`, and
+`Ref2VA/transformer/**`. It does not download or load the diffusers-format
+`transformer`, `transformer_ref`, or `vae` weights at the repository root, nor
+duplicate Ref2VA copies of shared components.
 
 Install vLLM-Omni from the checkout containing MiniMax H3 support. The
 two-GPU RTX 5090/4090 profiles use cuDNN attention and do not need
@@ -56,16 +63,17 @@ reference-video preparation and MP4 output.
 
 ## Start a server
 
-One server loads one checkpoint partition. Set `MODEL` to `FL2VA` for T2VA
-and FL2VA requests, or to `Ref2VA` for either Ref2VA request.
+Pass the repository ID directly. The pipeline uses `FL2VA` for model discovery
+and shared components, and loads the second DiT from `Ref2VA/transformer`.
 
 ### Memory and storage requirements
 
 Treat GPU HBM, host RAM, and checkpoint storage as separate requirements. Each
 H3 checkpoint partition (`FL2VA` or `Ref2VA`) contains about **134 GiB** of
-BF16 safetensors (about **135 GiB** on disk). Keeping both partitions locally
-therefore needs roughly **270 GiB** of model storage, although the examples
-serve only one partition at a time.
+BF16 safetensors (about **135 GiB** on disk). Keeping both partitions
+locally therefore needs roughly **270 GiB** of model storage. A combined
+service downloads both; `--task-type fl2va` or `--task-type ref2va` downloads
+only the selected partition.
 
 CPU offload and distributed layerwise offload reduce GPU residency; they do
 not make the model weights disappear. With `--dlo-no-use-allgather`, each
@@ -86,7 +94,7 @@ This matches the accuracy-qualified reference path and prevents the Qwen3-VL
 encoder and DiT from being resident on the GPU at the same time.
 
 ```bash
-export MODEL="${MODEL_ROOT}/FL2VA"
+export MODEL=MiniMaxAI/MiniMax-H3
 export PORT=8091
 
 CUDA_VISIBLE_DEVICES=0 \
@@ -103,8 +111,8 @@ vllm serve "${MODEL}" \
 ```
 
 Use a GPU with enough memory for the active H3 component and enough system RAM
-for the offloaded components. CPU offload reduces GPU memory pressure but adds
-PCIe/NVLink transfer latency.
+for both offloaded DiTs plus the shared components. Model-level offload keeps
+the two DiTs mutually exclusive on GPU, but adds PCIe/NVLink transfer latency.
 
 ### Two 24/32 GB GPUs: TP2 distributed layerwise offload
 
@@ -116,7 +124,7 @@ copied to the GPUs once per denoise stage, reused by every sampling step, and
 released before VAE decode so the decoder can reuse their HBM.
 
 ```bash
-export MODEL="${MODEL_ROOT}/FL2VA"
+export MODEL=MiniMaxAI/MiniMax-H3
 export PORT=8091
 
 CUDA_VISIBLE_DEVICES=0,1 \
@@ -127,6 +135,7 @@ vllm serve "${MODEL}" \
   --host 0.0.0.0 \
   --port "${PORT}" \
   --trust-remote-code \
+  --task-type fl2va \
   --num-gpus 2 \
   --tensor-parallel-size 2 \
   --usp 1 \
@@ -198,9 +207,9 @@ bash examples/offline_inference/minimax_h3/run_h3_2gpu_all_tasks.sh
 The script selects 20 resident layers for `PROFILE=rtx5090` and 12 for
 `PROFILE=rtx4090`; `DLO_RESIDENT_LAYERS=N` overrides either default.
 
-### Four GPUs: measured best-practice throughput
+### Four GPUs: throughput-oriented combined service
 
-The best validated four-GPU configuration on four NVIDIA B300 GPUs is:
+For a combined service on four high-memory GPUs, use:
 
 - no CPU or layerwise offload;
 - Ulysses sequence parallelism degree 4;
@@ -208,8 +217,11 @@ The best validated four-GPU configuration on four NVIDIA B300 GPUs is:
 - regional `torch.compile` for the repeated DiT blocks;
 - dense BF16 `TRTLLM_ATTN`, with Ring and TP left at 1.
 
+Both DiTs remain resident in this no-offload configuration. If they do not fit,
+use model-level CPU offload.
+
 ```bash
-export MODEL="${MODEL_ROOT}/FL2VA"
+export MODEL=MiniMaxAI/MiniMax-H3
 export PORT=8091
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
@@ -305,7 +317,7 @@ vLLM-style tensor-parallel layers and runs with distributed collectives over
 its own encoder process group):
 
 ```bash
-export MODEL="${MODEL_ROOT}/FL2VA"
+export MODEL=MiniMaxAI/MiniMax-H3
 export PORT=8091
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
@@ -335,12 +347,9 @@ the reference path within bf16 rounding: every encoder rank all-reduces the
 row-parallel projections, so the full `[seq, 5120]` layer-50 hidden state is
 replicated on every rank.
 
-To serve Ref2VA, stop the FL2VA server and restart the same one- or four-GPU
-command with:
-
-```bash
-export MODEL="${MODEL_ROOT}/Ref2VA"
-```
+No restart is needed: `task=fl2va` routes to `FL2VA/transformer`, while
+`task=ref2va` routes to
+`Ref2VA/transformer`. T2VA uses the FL2VA DiT.
 
 ### Online FP8 quantization
 
@@ -396,7 +405,7 @@ export API_URL="http://127.0.0.1:${PORT}/v1/videos/sync"
 
 ### 1. T2VA: text to video and audio
 
-Run this request against the `FL2VA` partition:
+Run this request against the combined service:
 
 ```bash
 curl -sS -X POST "${API_URL}" \
@@ -414,7 +423,7 @@ curl -sS -X POST "${API_URL}" \
 
 ### 2. FL2VA: first frame to video and audio
 
-Run this request against the `FL2VA` partition. When width and height are
+Run this request against the combined service. When width and height are
 omitted, H3 preserves the first-frame aspect ratio and uses a 768-pixel short
 edge.
 
@@ -453,10 +462,11 @@ curl -sS -X POST "${API_URL}" \
 
 ### 3. Ref2VA: image-only, image/audio, or mixed references
 
-Run these requests against the `Ref2VA` partition. Image-only Ref2VA omits
-`audio_reference`; adding one or more audio references is optional. The typed
-fields accept one object or an ordered JSON list. `audio_reference` accepts an
-HTTP(S) URL or a `data:` URL.
+Run these requests against the combined service or a Ref2VA-only service.
+Image-only Ref2VA omits `audio_reference`; adding one or more audio references
+is optional. The typed fields accept one object or an ordered JSON list.
+`audio_reference` accepts an HTTP(S) URL or a `data:` URL. In one terminal,
+expose the local reference assets to the serving host:
 
 ```bash
 python -m http.server 8092 \
@@ -506,7 +516,7 @@ shorter, the reference soundtrack is truncated to the generated clip.
 
 ### 4. Ref2VA: video, separate audio, and mixed references
 
-Run this request against the `Ref2VA` partition. Repeat the
+Run this request against the combined service. Repeat the
 `input_references` multipart field once per source video. H3 consumes the
 videos in form order and preserves their original soundtracks during
 conditioning.
@@ -568,7 +578,7 @@ than one is requested.
 
 | Parameter | Recommended value | Notes |
 |-----------|-------------------|-------|
-| `task` | `t2va`, `fl2va`, or `ref2va` | Passed in `extra_params`; must match the served partition |
+| `task` | `t2va`, `fl2va`, or `ref2va` | Passed in `extra_params`; selects the task-specific DiT |
 | `duration` | Workload-specific | Decimal seconds in `extra_params`; converted to H3-compatible frame count |
 | `fps` | `24` | H3 output FPS is fixed |
 | `num_inference_steps` | `50` | Matches the reference accuracy workloads |
@@ -610,7 +620,8 @@ reduction.
 
 ## Known limitations
 
-- Each server process loads only one checkpoint partition.
+- Combined serving requires sibling `FL2VA` and `Ref2VA` directories, loads
+  both task-specific DiTs, and loads shared components once from `FL2VA`.
 - H3 currently executes one generation request per diffusion batch.
 - The first regional-compile request is a warmup and should not be included in
   steady-state performance measurements.
