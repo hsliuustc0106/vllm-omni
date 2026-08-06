@@ -1,0 +1,156 @@
+# Review Execution and Delivery
+
+Use this reference for every review. It defines snapshot collection, gates,
+validation records, delivery permissions, maintainer tone, and re-review.
+
+## Contents
+
+- [Freeze the review surface](#freeze-the-review-surface)
+- [Report status before analysis](#report-status-before-analysis)
+- [Apply review gates](#apply-review-gates)
+- [Run bounded validation](#run-bounded-validation)
+- [Deliver maintainer-style findings](#deliver-maintainer-style-findings)
+- [Re-review safely](#re-review-safely)
+
+## Freeze the review surface
+
+For a GitHub PR, read the base/head SHA before and after fetching metadata and
+the diff:
+
+```bash
+gh api "repos/vllm-project/vllm-omni/pulls/<PR>" \
+  --jq '{base_sha: .base.sha, head_sha: .head.sha}'
+REVIEW_FIELDS="number,url,title,body,isDraft,baseRefName,headRefName,mergeable,mergeStateStatus,statusCheckRollup,files"
+gh pr view <PR> --repo vllm-project/vllm-omni \
+  --json "${REVIEW_FIELDS}"
+gh pr diff <PR> --repo vllm-project/vllm-omni
+gh api "repos/vllm-project/vllm-omni/pulls/<PR>" \
+  --jq '{base_sha: .base.sha, head_sha: .head.sha}'
+```
+
+Discard the snapshot if either SHA changed. Do not mix comments or validation
+from different heads.
+
+For a local branch/worktree, determine the target ref from the user, current PR,
+or configured upstream; never infer it from the branch name. Resolve the target
+once and include all task-owned worktree state:
+
+```bash
+git status --short
+git rev-parse HEAD
+git rev-parse <target-ref>
+git merge-base <target-base-sha> HEAD
+git diff --stat <comparison-commit>
+git diff --name-status <comparison-commit>
+git diff <comparison-commit>
+git ls-files --others --exclude-standard
+```
+
+For local changes without PR metadata, mark the title/body as synthetic. Base
+them on the user request and commit messages without inventing validation claims.
+
+If no PR, branch, or usable worktree is identifiable, ask for a PR URL/number or
+explicit base and head rather than guessing.
+
+## Report status before analysis
+
+Within 60 seconds of starting, and before InferMatrix knowledge reads, source
+searches, or tests, send this host update:
+
+```text
+Pinned head: <SHA>
+Base/comparison: <ref and SHA>
+CI: <pass/fail/pending/not applicable>
+Mergeability: <state/not applicable>
+Preliminary findings: <brief finding or none yet>
+```
+
+Mark early findings as preliminary and continue. This is not a GitHub comment.
+
+## Apply review gates
+
+- Report draft/WIP state. Continue a local review when explicitly requested,
+  but do not publish review events without separate authorization.
+- Record DCO, pre-commit, required CI, and mergeability. Pending or unknown gates
+  do not block source review.
+- Treat a failed gate as its own evidence. Do not restate its formatting/lint
+  output as a new code-review finding.
+- Open CI logs only when the first failing step overlaps the frozen diff or
+  blocks the verdict. Start with the first error, not the last cascade.
+- Treat the PR body as navigation. Commands, benchmark tables, and claimed tests
+  become evidence only after their provenance and relevance are checked.
+
+## Run bounded validation
+
+Keep one evidence packet for files read, bounded searches, callers, tests, CI,
+hardware, routes, and findings. Reuse it rather than refetching facts.
+
+Before pytest, run a short import/version compatibility check. Record each
+validation result with:
+
+```text
+repo, head SHA, command, result, Python/platform, dependency or lock fingerprint
+```
+
+After preflight, run targeted tests and low-cost static checks alongside source
+inspection when possible. Map source symbols to tests with bounded `rg` searches
+rather than assuming the test directory mirrors production paths.
+
+Classify failures as code, test, infrastructure, or flaky before reporting.
+Skipped hardware tests are gaps, not passes. For available hardware, verify the
+smallest representative unit/E2E path and compare actual output with PR claims.
+
+## Deliver maintainer-style findings
+
+Default to roughly 1-5 short comments, but treat that as calibration rather than
+a quota: report every real blocker and report no finding when there is no issue.
+
+Write each finding as:
+
+```text
+[P1] Short imperative title — path/to/file.py:<line>
+<Trigger or call path>. <Current behavior and impact>. <Smallest fix direction>.
+```
+
+Use concise maintainer tone:
+
+- State the issue or ask the decisive question directly.
+- Keep obvious fixes short; reserve long comments for architecture.
+- Omit empty sections, review preambles, inline praise, dramatic emphasis, and
+  phrases such as “Nit:” or “I left a few comments.”
+- Keep rule IDs, blocker tables, grades, and audit matrices internal unless the
+  user asks for the complete audit.
+
+Verify every inline `path:line` against the frozen diff and recheck the head
+before delivery. Prefer one root-cause comment to several symptom comments.
+
+Local presentation is the default. Only explicit authorization permits GitHub
+posting. When authorized, publish one consolidated final review after
+validation; do not post preliminary or incremental comments. Submit a review
+event (`APPROVE`, `COMMENT`, or `REQUEST_CHANGES`) only when the user explicitly
+chooses that event.
+
+Before finalizing Direct mode, call `validate_direct_review` with
+`final_comment_count=1` and:
+
+- `subtraction_signal="none"` when no helper/class/fallback/compatibility/public
+  behavior was added or expanded; or
+- `subtraction_signal="triggered"` plus concrete subtraction items or a
+  minimality proof.
+
+A partial completion result must remain a partial review with the missing
+evidence named.
+
+## Re-review safely
+
+Freeze the new head and compare it with the previously reviewed SHA. Then:
+
+1. inspect the delta and every file affected by conflict resolution or rebase;
+2. revalidate earlier findings against current lines and behavior;
+3. read unresolved, non-outdated threads and the author's evidence;
+4. rerun only checks invalidated by the delta;
+5. look for new regressions introduced by the fix;
+6. do not repeat resolved or outdated comments.
+
+If the target head changes during re-review, discard stale validation and start
+again from the new snapshot.

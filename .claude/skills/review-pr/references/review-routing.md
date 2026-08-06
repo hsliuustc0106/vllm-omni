@@ -1,102 +1,140 @@
 # vLLM-Omni Review Routing
 
-Load this reference only after collecting the changed-file census. Select the
-narrowest matching rows; do not load every skill for every review.
+Use this reference after the diff census. Select the narrowest matching domain
+rows and risk checks; do not load every linked skill.
+
+## Contents
+
+- [Route by changed surface](#route-by-changed-surface)
+- [Map architecture ownership](#map-architecture-ownership)
+- [Scan recurring blockers](#scan-recurring-blockers)
+- [Require change-specific evidence](#require-change-specific-evidence)
+- [Calibrate findings](#calibrate-findings)
 
 ## Route by changed surface
 
 | Changed surface or claim | Load | Review emphasis |
 | --- | --- | --- |
 | Any production-code diff | [`precheck-pr` code-quality patterns](../../precheck-pr/references/code-quality.md) | Apply only to added lines: kwargs string plumbing, swallowed exceptions, misleading types, hot-path copies, and event-loop blocking. |
-| Tests, missing tests, or CI marker/wiring changes | [`vllm-omni-test`](../../vllm-omni-test/SKILL.md) | Map the runtime path to L1-L4 coverage, markers, Buildkite wiring, and a runnable focused command. |
-| Bug fix, public/config change, model addition, or performance claim | [`precheck-pr` evidence checklists](../../precheck-pr/references/checklists.md) | Reuse the relevant evidence requirements, but independently verify the author-facing claims. |
-| New or changed diffusion pipeline/model | [`add-diffusion-model`](../../add-diffusion-model/SKILL.md) | Transformer/pipeline contract, latent shapes, parallelism, cache acceleration, offline and online paths, docs, and E2E coverage. |
-| Diffusion performance or benchmark claim | [`diffusion-perf-opt`](../../diffusion-perf-opt/SKILL.md) | Measurement protocol, stage timings, parallel strategy, quality gate, peak memory, and comparable A/B evidence. |
-| New or changed TTS model | [`add-tts-model`](../../add-tts-model/SKILL.md) | Model/pipeline registration, optional dependencies, AR/stage contracts, serving path, samples, and tests. |
-| Quantization, checkpoint dtype, or weight-loading change | [`quantization`](../../quantization/SKILL.md) | Method selection, modality compatibility, weight mapping, scale/dtype/device handling, output quality, and hardware evidence. |
-| NPU runner or Ascend-specific upgrade | [`vllm-omni-npu-upgrade`](../../vllm-omni-npu-upgrade/SKILL.md) | GPU-to-NPU semantic translation, runner lifecycle, platform guards, parity, and NPU validation. |
+| Tests, missing tests, or CI wiring | [`vllm-omni-test`](../../vllm-omni-test/SKILL.md) | Map the live path to L1-L4 coverage, markers, Buildkite wiring, and a focused command. |
+| Bug fix, public/config change, model addition, or performance claim | [`precheck-pr` evidence checklists](../../precheck-pr/references/checklists.md) | Reuse the relevant evidence bar, then verify the claims independently. |
+| New or changed diffusion pipeline/model | [`add-diffusion-model`](../../add-diffusion-model/SKILL.md) | Pipeline contracts, latent shapes, parallel/cache integration, offline/online paths, docs, and E2E coverage. |
+| Diffusion performance claim | [`diffusion-perf-opt`](../../diffusion-perf-opt/SKILL.md) | Measurement protocol, stage timing, parallel strategy, quality, memory, and comparable A/B evidence. |
+| New or changed TTS model | [`add-tts-model`](../../add-tts-model/SKILL.md) | Registration, optional dependencies, AR/stage contracts, serving, outputs, and tests. |
+| Quantization, dtype, or weight loading | [`quantization`](../../quantization/SKILL.md) | Method/layer/device compatibility, weight mapping, scale/dtype handling, quality, and hardware evidence. |
+| NPU runner or Ascend-specific upgrade | [`vllm-omni-npu-upgrade`](../../vllm-omni-npu-upgrade/SKILL.md) | GPU-to-NPU translation, runner lifecycle, platform guards, parity, and NPU validation. |
 
-If a linked skill is absent in an older checkout, continue with live source and
-tests and state the missing repository guidance. Do not fetch a replacement
-skill from an unrelated branch during review.
+If a linked skill is absent in the reviewed checkout, continue with live source
+and tests and state the missing repository guidance. Do not import a replacement
+from another branch during review.
 
-## Cross-cutting contract map
+## Map architecture ownership
 
-Use the applicable rows to structure source inspection. A row with no changed
-contract is not automatically a required test dimension.
+| Owner | Primary paths | Contract to preserve |
+| --- | --- | --- |
+| Entrypoints and I/O | `entrypoints/`, `inputs/`, `outputs/`, `request.py`, `data_entry_keys.py` | Validate public inputs, preserve request identity/modality, serialize responses, and map errors without owning model policy. |
+| Configuration | `config/`, `deploy/`, stage configuration | Resolve authoring inputs once, keep transport-safe config separate from process-local runtime objects, and reject invalid topology early. |
+| Orchestration | `engine/`, `distributed/omni_coordinator/`, `distributed/ray_utils/` | Own stage routing, ordering, lifecycle, cancellation, startup, shutdown, and failure propagation. |
+| Connectors | `distributed/omni_connectors/`, platform connectors | Transfer and synchronize data without choosing stages; preserve sender/receiver schema, completion, timeout, backpressure, and cleanup. |
+| AR runtime | `core/`, `worker/` | Preserve upstream scheduler/request-state semantics; workers execute rather than route. |
+| Diffusion runtime | `diffusion/sched/`, `executor/`, `worker/`, `diffusion_engine.py`, `ipc.py` | Keep one scheduler-owned request lifecycle and release all request state on terminal paths. |
+| Model integration | `model_executor/`, `model_extras/`, `plugins/`, `diffusion/models/`, registries/loaders | Select through registries, keep model policy out of orchestration, and align config, exports, loaders, processors, and tests. |
+| Platform layer | `platforms/`, platform attention/quantization | Isolate vendor capability detection and imports; preserve common import paths and supported fallback behavior. |
+| Cache and quantization | prefix/KV/latent caches, `quantization/`, diffusion quantization | Define complete identity, validity, eviction/cleanup, disabled/reference paths, and incompatible-input rejection. |
+| Metrics and benchmarks | `metrics/`, profilers, benchmarks | Preserve metric meaning and request correlation; keep profiling opt-in and benchmarks reproducible and correctness-aware. |
 
-| Risk | Trace or matrix |
-| --- | --- |
-| Public API or config | Each accepted source/alias/default -> validation -> normalized owner value -> every consumer; include invalid, duplicate, and compatibility inputs. |
-| Offline and online parity | Same user field/default -> each dispatcher -> equivalent model/stage consumer; include streaming when exposed. |
-| Stage topology | Pipeline config -> stage construction -> rank/group mapping -> connector payload -> receiving stage; include single- and multi-stage layouts that remain supported. |
-| Tensor/data contract | Producer shape/dtype/device/layout -> serialization or collective -> consumer expectation; include batch/CFG expansion and empty/optional values. |
-| Async/resource lifecycle | Allocation/start -> ownership transfer -> normal completion -> exception -> timeout/cancellation -> shutdown; identify blocking points and concurrency bounds. |
-| Cache/state | Key construction -> population -> reuse/invalidation -> cross-request isolation -> cleanup; verify feature-off behavior. |
-| Registry/model loading | Config/model identifier -> registry -> import/export -> class/config construction -> dependency/weight load -> first inference. |
-| Performance | Exact workload/environment -> baseline -> PR -> quality equivalence -> stage metrics -> latency/throughput/memory claim. |
+When ownership crosses rows, trace the producer and final consumer on both sides.
+Treat silent ownership movement as a design change that needs explicit evidence.
 
-## Minimum evidence by change type
+## Scan recurring blockers
+
+Apply only when the diff introduces or exposes the pattern. Existing backlog is
+not a finding by itself.
+
+- **Exceptions:** reject bare or broad catches that hide init, config, weight
+  loading, request, or execution failures. Catch expected types and preserve
+  actionable context.
+- **Public contracts:** check removed parameters/APIs, newly required arguments,
+  changed defaults, aliases, and migration behavior across every entrypoint.
+- **Validation:** validate at the owning boundary before expensive work; reject
+  unknown, duplicate, malformed, or incompatible inputs visibly.
+- **Async/concurrency:** reject blocking I/O or sleep on the event loop, locks
+  held across `await`, accidental serialization, and unbounded background work.
+- **Lifecycle:** cover allocation/start, success, partial failure, timeout,
+  cancellation, shutdown, and cleanup. Ensure terminal states are monotonic.
+- **Connectors:** verify sender/receiver identity, shape, dtype, device, ordering,
+  completion, timeout, error propagation, and resource release.
+- **Distributed execution:** cover affected rank/world-size/topology modes and a
+  supported single-device path; isolate vendor and collective assumptions.
+- **Cache/state:** include every correctness-affecting input in the key; verify
+  request isolation, feature-off behavior, invalidation, eviction, and cleanup.
+- **Model/config registration:** align registry entries, architecture names,
+  exports, YAML/config, processors, loaders, dependencies, and examples.
+- **Tensor/media data:** trace shape, dtype, device, layout, batch/CFG expansion,
+  empty/optional values, and serialization through the final consumer.
+- **Tests:** reject helper-only or over-mocked tests that bypass the production
+  dispatcher, use an unrealistic MRO, or cannot fail when behavior regresses.
+- **Security:** reject secrets, unsafe deserialization/shell/eval, user payloads
+  in logs, unbounded metric labels, and unvalidated user-controlled paths.
+
+## Require change-specific evidence
 
 ### Bug fixes
 
-- Reproduce the original failure or identify a checked-in regression test that
-  fails on the frozen base and passes on the frozen head.
-- Trace the fix to the root owner instead of accepting a downstream symptom
-  patch.
-- Check analogous paths only when the same contract reaches them.
+- Reproduce the failure or identify a regression test that fails on the frozen
+  base and passes on the frozen head.
+- Trace the repair to the root owner and check analogous paths only when the
+  same contract reaches them.
 
-### Public API, schema, CLI, or config changes
+### Public API, CLI, schema, or config
 
-- Check a normal input, invalid input, default/omitted input, and any supported
-  alias or legacy form.
-- Verify both streaming and non-streaming endpoints when both expose the field.
-- Require docs/examples for user-visible additions or behavior changes.
-- Treat silent acceptance, overwrite, or fallback as a defect when the contract
-  promises strict validation.
+- Check normal, invalid, omitted/default, duplicate, alias, and legacy inputs.
+- Verify streaming/non-streaming and offline/online paths when both expose the
+  contract.
+- Require user-facing docs and migration guidance for visible behavior changes.
 
-### Model and pipeline changes
+### Model and pipeline additions
 
-- Verify registration, exports, pipeline configuration, processor/loader path,
-  and terminal output.
-- Require at least one test that reaches the production dispatcher, not only a
-  helper mock.
-- Check representative offline and online paths when both are supported.
-- Treat claimed hardware execution as unverified without actual device evidence.
+- Verify registry, exports, config, processor/loader, dependencies, and a
+  representative production-dispatch inference path.
+- Require valid output at the correct modality/shape/rate and comparison with a
+  known-good implementation when available.
+- For diffusion, check both supported serving modes, latent/parallel/cache
+  contracts, model/feature docs, and production-path E2E coverage.
+- Request performance, memory, acceleration, or quality evidence only for claims
+  and supported requirements that actually apply; do not impose stale matrices.
 
-### Distributed, connector, and scheduler changes
+### Distributed, connector, scheduler, cache, or lifecycle changes
 
-- Enumerate affected topology/rank/stage modes instead of testing one happy
-  layout.
-- Verify payload schema, sender/receiver symmetry, shutdown/error propagation,
-  and no event-loop blocking.
-- Check feature-disabled and constrained/offload behavior when supported.
+- Build a compact path/topology matrix covering feature off/on, supported rank
+  layouts, concurrency, failure, timeout/cancellation, and cleanup.
+- Verify payload symmetry and the final owner of request/cache/resource state.
 
-### Performance and accuracy changes
+### Performance, memory, or accuracy claims
 
-- Compare base and head with the same hardware, software, model, inputs, seed,
+- Compare base and head on the same hardware, software, model, inputs, seed,
   precision, parallelism, warmup, and measured repetitions.
-- Require both performance and output-quality evidence; a speedup alone does not
-  establish correctness.
-- Prefer checked-in commands or scripts and report variability, not a best run.
-- Do not invent universal regression thresholds when the repository or PR
-  contract does not define them; explain the observed tradeoff.
+- Require both the claimed metric and correctness/quality evidence. Include exact
+  commands, variability, stage metrics when relevant, and peak memory.
+- Explain regressions rather than applying universal thresholds that the current
+  repository contract does not define.
 
-### Documentation-only changes
+### Test-only or documentation-only changes
 
-- Check links, navigation/build rules, commands, identifiers, and version claims.
-- Inspect only the bounded live code or config needed to verify described
-  behavior.
-- Skip pytest unless the docs change executable examples with an existing
-  lightweight test path.
+- For tests, verify assertions pin the intended contract, markers select the
+  right CI lane, and the test reaches the relevant production path.
+- For docs, check links, navigation/build rules, commands, identifiers, version
+  claims, and the bounded live contract being described.
 
-## Finding discipline
+## Calibrate findings
 
-- Anchor each finding to an added or modified line whenever possible.
-- Prove the path reaches a real consumer; helper-only concerns are notes until
-  reachability is established.
-- Use missing tests as a finding only when they leave a changed high-risk
-  contract unprotected.
-- Consolidate repeated symptoms under one owner/root-cause comment.
-- Record unavailable hardware, incomplete CI, or missing reproduction as a
-  validation gap, not automatically as a defect.
+- **P0:** security exposure, data corruption, or broad project unusability.
+- **P1:** likely runtime failure, wrong output, compatibility break, unsafe
+  lifecycle, or missing evidence for a changed high-risk contract.
+- **P2:** a real non-blocking defect or maintainability issue with a concrete
+  future failure mode.
+
+Anchor each finding to a current diff line when possible. Prove the trigger and
+reachable path, consolidate downstream symptoms under one root cause, and turn
+unavailable hardware or incomplete CI into a validation gap rather than an
+automatic defect.
