@@ -41,6 +41,9 @@ _DIFFUSION_MODEL_METADATA: dict[str, DiffusionModelMetadata] = {
         supports_multimodal_inputs=True,
         max_multimodal_image_inputs=9,
         supports_mixed_reference_inputs=True,
+        # H3 represents alignment padding as a second packed sequence.  The
+        # packed TRTLLM backend consumes cu_seqlens and isolates that padding.
+        attention_mask_free=True,
     ),
     "WanPipeline": DiffusionModelMetadata(attention_mask_free=True),
     "WanImageToVideoPipeline": DiffusionModelMetadata(attention_mask_free=True),

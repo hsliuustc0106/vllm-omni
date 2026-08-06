@@ -41,6 +41,13 @@ B300/GB200 `FLASH_ATTN` profile:
 ```bash
 uv venv
 source .venv/bin/activate
+uv pip install -e .
+```
+
+To keep FA4 available as an explicit option on Blackwell, install the
+FlashAttention-4 extra:
+
+```bash
 uv pip install -e '.[fa4]'
 ```
 
@@ -199,15 +206,13 @@ The best validated four-GPU configuration on four NVIDIA B300 GPUs is:
 - Ulysses sequence parallelism degree 4;
 - native tiled VAE patch parallelism degree 4;
 - regional `torch.compile` for the repeated DiT blocks;
-- CuTe FlashAttention-4 through the `FLASH_ATTN` backend, with Ring and TP
-  left at 1.
+- dense BF16 `TRTLLM_ATTN`, with Ring and TP left at 1.
 
 ```bash
 export MODEL="${MODEL_ROOT}/FL2VA"
 export PORT=8091
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
-FLASHINFER_DISABLE_VERSION_CHECK=1 \
 VLLM_WORKER_MULTIPROC_METHOD=spawn \
 VLLM_OMNI_VIDEO_SYNC_TIMEOUT=1800 \
 vllm serve "${MODEL}" \
@@ -220,18 +225,75 @@ vllm serve "${MODEL}" \
   --ring 1 \
   --vae-patch-parallel-size 4 \
   --vae-parallel-mode tile \
-  --vae-use-tiling \
-  --diffusion-attention-backend FLASH_ATTN
+  --vae-use-tiling
 ```
-
-On Blackwell, `FLASH_ATTN` selects FA4. Confirm the server log contains
-`Using CuTe FlashAttention-4 on Blackwell` before recording measurements.
 
 Do not add `--enforce-eager` to this performance configuration. The first
 request includes regional compilation; warm the server once before measuring
 steady-state latency. H3 is CFG-distilled, so `--cfg-parallel-size` must remain
 1. The H3 VAE supports its native `tile` mode, not
 `spatial_shard_height` or `spatial_shard_width`.
+
+### Attention Backends
+
+On datacenter Blackwell GPUs, MiniMax H3 defaults to dense BF16
+`TRTLLM_ATTN`; no attention backend flag is required. To select it explicitly,
+use:
+
+```bash
+--diffusion-attention-backend TRTLLM_ATTN
+```
+
+Stable measurements with the four-GPU profile above put dense `TRTLLM_ATTN`
+and FA4 within 2% of each other. `TRTLLM_ATTN` remains the datacenter Blackwell
+default and enables the optional optimizations below. Confirm the server log
+contains `Defaulting to diffusion attention backend TRTLLM_ATTN` before
+recording measurements when using the default selection.
+
+FA4 remains available by explicitly selecting the `FLASH_ATTN` backend:
+
+```bash
+--diffusion-attention-backend FLASH_ATTN
+```
+
+On Blackwell, `FLASH_ATTN` selects FA4. Confirm the server log contains
+`Using CuTe FlashAttention-4 on Blackwell` before recording FA4 measurements.
+
+`TRTLLM_ATTN` additionally supports two **lossy** optimizations for the long main
+DiT attention sequence: SAGE attention quantization and Skip-Softmax Sparse
+Attention. SAGE quantizes Q/K to the configured dtype and V to FP8. This example uses
+`fp8_e4m3` for Q/K; B200 also supports `int8` Q/K. The TRTLLM SAGE path fixes V
+to FP8, so vLLM-Omni only exposes the Q/K dtype. The token refiner is a short
+attention path, so the `per_role` override leaves SAGE and Skip-Softmax disabled
+for it. The example enables the calibration-free Skip-Softmax path with
+`threshold=0.05`, after the normalized timestep reaches `0.97`:
+
+```bash
+--diffusion-attention-config '{
+  "default": {
+    "backend": "TRTLLM_ATTN",
+    "quant": {
+      "dtype_qk": "fp8_e4m3",
+      "q_block_size": 1,
+      "k_block_size": 16
+    },
+    "skip_softmax": {
+      "threshold": 0.05,
+      "disabled_until_timestep": 0.97
+    }
+  },
+  "per_role": {
+    "minimax_h3.token_refiner": {
+      "backend": "TRTLLM_ATTN"
+    }
+  }
+}'
+```
+
+For configuration details, see
+[TRTLLM_ATTN Backend and Skip-Softmax](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends.md#trtllm_attn-backend-and-skip-softmax)
+and
+[TRTLLM_ATTN SAGE Quantization](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends.md#trtllm_attn-sage-quantization).
 
 ### Text encoder tensor parallelism
 
@@ -247,7 +309,6 @@ export MODEL="${MODEL_ROOT}/FL2VA"
 export PORT=8091
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
-FLASHINFER_DISABLE_VERSION_CHECK=1 \
 VLLM_WORKER_MULTIPROC_METHOD=spawn \
 VLLM_OMNI_VIDEO_SYNC_TIMEOUT=1800 \
 vllm serve "${MODEL}" \
@@ -261,8 +322,7 @@ vllm serve "${MODEL}" \
   --text-encoder-tp-size 4 \
   --vae-patch-parallel-size 4 \
   --vae-parallel-mode tile \
-  --vae-use-tiling \
-  --diffusion-attention-backend FLASH_ATTN
+  --vae-use-tiling
 ```
 
 `N` must divide the Qwen3-VL head counts (64 attention heads / 8 KV heads), so

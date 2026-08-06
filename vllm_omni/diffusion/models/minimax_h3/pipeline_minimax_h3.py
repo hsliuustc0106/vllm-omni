@@ -27,6 +27,7 @@ from vllm_omni.diffusion.distributed.parallel_state import (
     init_world_group,
 )
 from vllm_omni.diffusion.distributed.utils import get_local_device
+from vllm_omni.diffusion.forward_context import DenoiseProgressMixin
 from vllm_omni.diffusion.model_loader.diffusers_loader import (
     DiffusersPipelineLoader,
 )
@@ -446,6 +447,7 @@ class _SingleRankEncoderGroup:
 
 class MiniMaxH3Pipeline(
     nn.Module,
+    DenoiseProgressMixin,
     ProgressBarMixin,
     DiffusionPipelineProfilerMixin,
     SupportImageInput,
@@ -1371,7 +1373,11 @@ class MiniMaxH3Pipeline(
                     device=self.device,
                     imgvid_cond_noise_aug_for_inference=(MINIMAX_H3_IMGVID_COND_TIMESTEP),
                     audio_cond_noise_aug_for_inference=(MINIMAX_H3_AUDIO_REF_COND_TIMESTEP),
-                    on_step=lambda step, video, audio: progress.update(),
+                    on_step_start=lambda step, video_sigma, audio_sigma: self.record_denoise_step(
+                        step,
+                        normalized_timestep=video_sigma,
+                    ),
+                    on_step_end=lambda step, video, audio: progress.update(),
                 )
 
         target_video = video_rows[branch.update_mask_dev]

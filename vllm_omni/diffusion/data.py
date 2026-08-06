@@ -1434,6 +1434,10 @@ class SkipSoftmaxSpec:
         if self.target_sparsity is not None and self.threshold is not None:
             raise ValueError("skip_softmax: set either target_sparsity or threshold, not both.")
 
+    @property
+    def enabled(self) -> bool:
+        return self.threshold is not None or self.target_sparsity is not None
+
 
 @dataclass
 class AttnQuantSpec:
