@@ -1,0 +1,4 @@
+interface:
+  display_name: "vLLM-Omni PR Review"
+  short_description: "Review vLLM-Omni PRs with maintainer evidence"
+  default_prompt: "Use $review-pr to review this vLLM-Omni pull request for blocking correctness, compatibility, and validation issues."
