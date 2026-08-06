@@ -38,9 +38,23 @@ Default to maintainer brevity. A detailed or audit request expands coverage and
 lists `path:line` findings, but keeps the same confidence and severity bar.
 InferMatrix Direct remains the default; use Strict only when explicitly asked.
 
+## Reference guide
+
 Read [review-execution.md](references/review-execution.md) for every review.
-Read [review-routing.md](references/review-routing.md) only after the diff census
-and load only the domain guidance selected there.
+After the diff census, read [review-routing.md](references/review-routing.md),
+then load only the references selected for the changed behavior:
+
+| Reference | Read when |
+| --- | --- |
+| [architecture.md](references/architecture.md) | Ownership, configuration, orchestration, connector, or cross-stage boundaries change. |
+| [blocker-patterns.md](references/blocker-patterns.md) | Production code adds a known correctness, lifecycle, compatibility, or security risk. |
+| [diffusion-checklist.md](references/diffusion-checklist.md) | A diffusion pipeline, model, scheduler, cache, or feature changes. |
+| [maintainer-style-study.md](references/maintainer-style-study.md) | Findings are ready for concise maintainer-style delivery. |
+| [model-addition-checklist.md](references/model-addition-checklist.md) | A model, architecture, loader, processor, registry, or stage config is added. |
+| [perf-verification.md](references/perf-verification.md) | The PR makes a latency, throughput, memory, or quality claim. |
+| [test-quality-evaluation.md](references/test-quality-evaluation.md) | Tests change, are absent for risky code, or may not exercise production behavior. |
+| [tests-docs-checklist.md](references/tests-docs-checklist.md) | Coverage, CI markers, examples, user docs, or PR evidence need review. |
+| [verification.md](references/verification.md) | Hardware, a server, or a runnable affected path is available for active verification. |
 
 ## Workflow
 
@@ -105,10 +119,10 @@ sibling implementations rather than assuming the changed hunk is the only path.
 
 ### 5. Apply the selected domain checks
 
-Use [review-routing.md](references/review-routing.md) to identify module owners,
-recurring vLLM-Omni failure modes, relevant repo-local skills, and minimum
-evidence. Inspect both sides of any config, registry, serialization, connector,
-cache, or stage boundary.
+Use [review-routing.md](references/review-routing.md) to choose the smallest
+applicable reference set and any existing repo-local domain skill. Inspect both
+sides of any config, registry, serialization, connector, cache, or stage
+boundary.
 
 When a diff adds or expands a helper, class, fallback, compatibility branch, or
 public behavior, run a subtraction pass: remove out-of-scope behavior and check
@@ -141,8 +155,10 @@ consolidated final result.
 Re-read the remote head immediately before delivery. If it changed, mark the
 review stale and restart from the new snapshot.
 
-Return findings first. Each finding must include an exact `path:line`, trigger
-or call path, current behavior, impact, and smallest fix direction. If there are
+Return findings first. Use
+[maintainer-style-study.md](references/maintainer-style-study.md) to keep them
+direct and brief. Each finding must include an exact `path:line`, trigger or
+call path, current behavior, impact, and smallest fix direction. If there are
 no findings, say so briefly and name material validation gaps.
 
 Keep the review read-only unless the user explicitly authorizes posting. Do not

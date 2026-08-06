@@ -112,14 +112,9 @@ Write each finding as:
 <Trigger or call path>. <Current behavior and impact>. <Smallest fix direction>.
 ```
 
-Use concise maintainer tone:
-
-- State the issue or ask the decisive question directly.
-- Keep obvious fixes short; reserve long comments for architecture.
-- Omit empty sections, review preambles, inline praise, dramatic emphasis, and
-  phrases such as “Nit:” or “I left a few comments.”
-- Keep rule IDs, blocker tables, grades, and audit matrices internal unless the
-  user asks for the complete audit.
+Use [maintainer-style-study.md](maintainer-style-study.md) for comment tone.
+Keep rule IDs, grades, and audit matrices internal unless the user asks for the
+complete audit.
 
 Verify every inline `path:line` against the frozen diff and recheck the head
 before delivery. Prefer one root-cause comment to several symptom comments.
