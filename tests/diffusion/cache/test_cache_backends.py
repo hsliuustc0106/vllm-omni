@@ -93,8 +93,8 @@ class TestCacheDiTBackend:
 
     @patch("vllm_omni.diffusion.cache.cachedit.backend.BlockAdapter")
     @patch("vllm_omni.diffusion.cache.cachedit.backend.cache_dit")
-    def test_enable_and_refresh_every_declared_dit(self, mock_cache_dit, mock_block_adapter):
-        """Combined pipelines enable and refresh Cache-DiT for every DiT."""
+    def test_lifecycle_applies_to_every_declared_dit(self, mock_cache_dit, mock_block_adapter):
+        """Combined pipelines manage every exact Cache-DiT target."""
         pipeline = Mock()
         pipeline.__class__.__name__ = "MiniMaxH3Pipeline"
         pipeline._dit_modules = ["transformer", "transformers_ref"]
@@ -104,18 +104,24 @@ class TestCacheDiTBackend:
             transformer._cache_dit_adapter_config = CacheDiTAdapterConfig(
                 block_forward_patterns={"blocks": ForwardPattern.Pattern_3}
             )
+        installed_adapters = [Mock(), Mock()]
+        mock_block_adapter.side_effect = installed_adapters
 
         backend = CacheDiTBackend({"Fn_compute_blocks": 2})
         backend.enable(pipeline)
         backend.refresh(pipeline, num_inference_steps=20)
+        backend.disable(pipeline)
 
-        assert len(backend._refresh_funcs) == 2
         assert mock_cache_dit.enable_cache.call_count == 2
         assert mock_cache_dit.refresh_context.call_count == 2
         assert {call.args[0] for call in mock_cache_dit.refresh_context.call_args_list} == {
             pipeline.transformer,
             pipeline.transformers_ref,
         }
+        assert [call.args[0] for call in mock_cache_dit.disable_cache.call_args_list] == installed_adapters
+        assert backend._refresh_funcs == []
+        assert backend._cache_targets == []
+        assert not backend.is_enabled()
 
     @patch("vllm_omni.diffusion.cache.cachedit.backend.cache_dit")
     def test_summary_skips_uncached_nested_dit(self, mock_cache_dit):
@@ -290,6 +296,32 @@ class TestCacheDiTBackend:
         backend.refresh(mock_pipeline, num_inference_steps=20)
 
         assert mock_cache_dit.refresh_context.call_count == 2
+
+    @patch("vllm_omni.diffusion.cache.cachedit.backend.BlockAdapter")
+    @patch("vllm_omni.diffusion.cache.cachedit.backend.cache_dit")
+    def test_refresh_rearms_force_refresh_hint(self, mock_cache_dit, mock_block_adapter):
+        """A once hint must be restored for every repeated request."""
+        pipeline = Mock()
+        pipeline.__class__.__name__ = "DiTPipeline"
+        pipeline.transformer = Mock()
+        pipeline.transformer._cache_dit_adapter_config = CacheDiTAdapterConfig(
+            block_forward_patterns={"layers": ForwardPattern.Pattern_0}
+        )
+
+        config = DiffusionCacheConfig(
+            force_refresh_step_hint=7,
+            force_refresh_step_policy="once",
+        )
+        backend = CacheDiTBackend(config)
+        backend.enable(pipeline)
+        backend.refresh(pipeline, num_inference_steps=20)
+        backend.refresh(pipeline, num_inference_steps=20)
+
+        assert mock_cache_dit.refresh_context.call_count == 2
+        for call in mock_cache_dit.refresh_context.call_args_list:
+            refresh_config = call.kwargs["cache_config"]
+            assert refresh_config.force_refresh_step_hint == 7
+            assert refresh_config.force_refresh_step_policy == "once"
 
     @patch("vllm_omni.diffusion.cache.cachedit.backend.BlockAdapter")
     @patch("vllm_omni.diffusion.cache.cachedit.backend.cache_dit")
