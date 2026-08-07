@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from operator import attrgetter
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 import cache_dit
@@ -38,14 +39,27 @@ def _dit_module_names(pipeline: SupportsComponentDiscovery) -> tuple[str, ...]:
     names = getattr(pipeline, "_dit_modules", None)
     if not isinstance(names, (list, tuple)):
         names = ("transformer",)
-    return tuple(name for name in names if isinstance(name, str) and getattr(pipeline, name, None) is not None)
+
+    resolved_names = []
+    for name in names:
+        if not isinstance(name, str):
+            continue
+        try:
+            module = attrgetter(name)(pipeline)
+        except AttributeError:
+            continue
+        if module is not None:
+            resolved_names.append(name)
+    return tuple(resolved_names)
 
 
 def cache_summary(pipeline: SupportsComponentDiscovery, details: bool = True) -> None:
     """Log Cache-DiT statistics for every transformer on the pipeline."""
 
-    transformers = [getattr(pipeline, name) for name in _dit_module_names(pipeline)]
+    transformers = [attrgetter(name)(pipeline) for name in _dit_module_names(pipeline)]
     for transformer in transformers:
+        if not BlockAdapter.is_cached(transformer):
+            continue
         cache_dit.summary(transformer, details=details)
 
     if not transformers:
@@ -64,7 +78,7 @@ def _make_pipeline_transformer_getter(
     def get_pipeline_transformer(
         pipeline: SupportsComponentDiscovery,
     ) -> nn.Module:
-        return cast(nn.Module, getattr(pipeline, name))
+        return cast(nn.Module, attrgetter(name)(pipeline))
 
     return get_pipeline_transformer
 

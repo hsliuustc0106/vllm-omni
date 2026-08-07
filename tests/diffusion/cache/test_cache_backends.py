@@ -11,6 +11,7 @@ This module tests the cache backend implementations:
 - DiffusionCacheConfig: configuration dataclass
 """
 
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import cache_dit
@@ -21,6 +22,7 @@ from vllm_omni.diffusion.cache.cachedit import (
     CacheDiTAdapterConfig,
     CacheDiTBackend,
     CacheDiTConfig,
+    cache_summary,
 )
 from vllm_omni.diffusion.cache.magcache import MagCacheBackend
 from vllm_omni.diffusion.cache.selector import get_cache_backend
@@ -114,6 +116,49 @@ class TestCacheDiTBackend:
             pipeline.transformer,
             pipeline.transformers_ref,
         }
+
+    @patch("vllm_omni.diffusion.cache.cachedit.backend.cache_dit")
+    def test_summary_skips_uncached_nested_dit(self, mock_cache_dit):
+        """Only DiT modules with an active Cache-DiT context are summarized."""
+        language_model = Mock()
+        language_model._is_cached = False
+        transformer = Mock()
+        transformer._is_cached = True
+        transformer.language_model = language_model
+        pipeline = SimpleNamespace(
+            _dit_modules=["transformer.language_model", "transformer"],
+            transformer=transformer,
+        )
+
+        cache_summary(pipeline)
+
+        mock_cache_dit.summary.assert_called_once_with(transformer, details=True)
+
+    @patch("vllm_omni.diffusion.cache.cachedit.backend.BlockAdapter")
+    @patch("vllm_omni.diffusion.cache.cachedit.backend.cache_dit")
+    def test_enable_and_refresh_nested_declared_dit(self, mock_cache_dit, mock_block_adapter):
+        """Dotted component paths resolve to their nested DiT module."""
+        transformer = Mock()
+        transformer._cache_dit_adapter_config = CacheDiTAdapterConfig(
+            block_forward_patterns={"blocks": ForwardPattern.Pattern_3}
+        )
+        pipeline = SimpleNamespace(
+            _dit_modules=["language_model.model"],
+            language_model=SimpleNamespace(model=transformer),
+        )
+
+        backend = CacheDiTBackend({"Fn_compute_blocks": 2})
+        backend.enable(pipeline)
+        backend.refresh(pipeline, num_inference_steps=20)
+
+        cache_summary(pipeline)
+        mock_cache_dit.enable_cache.assert_called_once()
+        mock_cache_dit.refresh_context.assert_called_once_with(
+            transformer,
+            num_inference_steps=20,
+            verbose=True,
+        )
+        mock_cache_dit.summary.assert_called_once_with(transformer, details=True)
 
     @patch("vllm_omni.diffusion.cache.cachedit.backend.logger")
     @patch("vllm_omni.diffusion.cache.cachedit.backend.cache_dit")
