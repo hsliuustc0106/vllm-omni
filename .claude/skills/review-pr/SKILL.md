@@ -39,10 +39,8 @@ lists `path:line` findings, but keeps the same confidence and severity bar.
 
 ## Reference guide
 
-Read [review-execution.md](references/review-execution.md) and
-[general-checks.md](references/general-checks.md) for every review. After the
-diff census, read [review-routing.md](references/review-routing.md), select one
-primary owner, and load a second owner only for a real cross-boundary call path.
+Load references in review order. Every file is linked directly below; read only
+the selected primary domain and applicable conditional checks.
 
 Each concise reference links to the maintained
 [vLLM-Omni documentation](https://docs.vllm.ai/projects/vllm-omni/en/latest/).
@@ -50,29 +48,42 @@ For branch-specific behavior, inspect the matching `docs/` file in the reviewed
 checkout first; use the published latest docs for current guidance and discovery.
 If docs and live code disagree, verify the code/tests and report the drift.
 
-### Primary owners
+### Review process
 
 | Reference | Read when |
 | --- | --- |
-| [configuration.md](references/configuration.md) | Config construction, deploy YAML, schema, defaults, registry, or topology changes. |
-| [serving.md](references/serving.md) | Entrypoints, request/response behavior, streaming, orchestration, or engine lifecycle changes. |
-| [model-executor.md](references/model-executor.md) | Model loading, stage inputs, runners, workers, or device startup changes. |
-| [diffusion-checklist.md](references/diffusion-checklist.md) | A diffusion pipeline, model, scheduler, cache, or feature changes. |
-| [distributed.md](references/distributed.md) | Connectors, KV transfer, collectives, routing, or cross-stage communication changes. |
-| [scheduler.md](references/scheduler.md) | Request state, token budgets, KV readiness, or prefix-cache behavior changes. |
+| [review-execution.md](references/process/review-execution.md) | Every review; freeze inputs, inspect safely, and deliver against the same snapshot. |
+| [general-checks.md](references/process/general-checks.md) | Every review; apply repository-wide correctness and evidence rules. |
+| [review-routing.md](references/process/review-routing.md) | After the diff census; select one primary domain and conditional checks. |
 
-### Cross-cutting references
+### Primary domain
 
 | Reference | Read when |
 | --- | --- |
-| [model-addition-checklist.md](references/model-addition-checklist.md) | A model, architecture, loader, processor, registry, or stage config is added. |
-| [platform-checks.md](references/platform-checks.md) | Hardware, kernel, attention backend, quantization, or vendor code changes. |
-| [perf-verification.md](references/perf-verification.md) | The PR makes a latency, throughput, memory, or quality claim. |
-| [test-quality-evaluation.md](references/test-quality-evaluation.md) | Tests change, are absent for risky code, or may not exercise production behavior. |
-| [tests-docs-checklist.md](references/tests-docs-checklist.md) | Coverage, CI markers, examples, user docs, or PR evidence need review. |
-| [verification.md](references/verification.md) | Hardware, a server, or a runnable affected path is available for active verification. |
-| [maintainer-style-study.md](references/maintainer-style-study.md) | Findings are ready for concise maintainer-style delivery. |
-| [review-requests.md](references/review-requests.md) | The user asks to identify, suggest, request, or ping code-owner reviewers. |
+| [configuration.md](references/domains/configuration.md) | Config construction, deploy YAML, schema, defaults, registry, or topology changes. |
+| [serving.md](references/domains/serving.md) | Entrypoints, request/response behavior, streaming, orchestration, or engine lifecycle changes. |
+| [model-executor.md](references/domains/model-executor.md) | Model loading, stage inputs, runners, workers, or device startup changes. |
+| [diffusion-checklist.md](references/domains/diffusion-checklist.md) | A diffusion pipeline, model, scheduler, cache, or feature changes. |
+| [distributed.md](references/domains/distributed.md) | Connectors, KV transfer, collectives, routing, or cross-stage communication changes. |
+| [scheduler.md](references/domains/scheduler.md) | Request state, token budgets, KV readiness, or prefix-cache behavior changes. |
+
+### Cross-cutting checks
+
+| Reference | Read when |
+| --- | --- |
+| [model-addition-checklist.md](references/checks/model-addition-checklist.md) | A model, architecture, loader, processor, registry, or stage config is added. |
+| [platform-checks.md](references/checks/platform-checks.md) | Hardware, kernel, attention backend, quantization, or vendor code changes. |
+| [perf-verification.md](references/checks/perf-verification.md) | The PR makes a latency, throughput, memory, or quality claim. |
+| [test-quality-evaluation.md](references/checks/test-quality-evaluation.md) | Tests change, are absent for risky code, or may not exercise production behavior. |
+| [tests-docs-checklist.md](references/checks/tests-docs-checklist.md) | Coverage, CI markers, examples, user docs, or PR evidence need review. |
+| [verification.md](references/checks/verification.md) | Hardware, a server, or a runnable affected path is available for active verification. |
+
+### Delivery and reviewer coordination
+
+| Reference | Read when |
+| --- | --- |
+| [maintainer-style-study.md](references/delivery/maintainer-style-study.md) | Findings are ready for concise maintainer-style delivery. |
+| [review-requests.md](references/delivery/review-requests.md) | The user asks to identify, suggest, request, or ping code-owner reviewers. |
 
 ## Workflow
 
@@ -88,7 +99,7 @@ it changes again, report the churn and wait for a stable target.
 For a PR, materialize the pinned head in an isolated detached worktree and run
 all source inspection and validation there. For a local review, freeze the
 committed, index, worktree, and NUL-safe in-scope untracked contents. Follow
-[review-execution.md](references/review-execution.md) for the required identity
+[review-execution.md](references/process/review-execution.md) for the required identity
 assertions and final byte-for-byte staleness check.
 
 ### 2. Build the diff census
@@ -104,7 +115,7 @@ from the PR description without tracing the live code.
 ### 3. Route from the live behavior
 
 Trace each claimed behavior through the changed producer to its live consumer,
-then use [review-routing.md](references/review-routing.md) to select one primary
+then use [review-routing.md](references/process/review-routing.md) to select one primary
 owner, a second owner only for a real cross-boundary call path, and the smallest
 applicable cross-cutting overlays. Treat titles and changed paths as hints; the
 live producer-consumer contract and repo-local routing map are authoritative.
@@ -113,7 +124,7 @@ general checks and applicable cross-cutting references.
 
 ### 4. Run the blocker scan
 
-Apply every category in [general-checks.md](references/general-checks.md) before
+Apply every category in [general-checks.md](references/process/general-checks.md) before
 lower-priority comments.
 
 For each changed value or behavior, trace:
@@ -162,7 +173,7 @@ Re-read the remote head immediately before delivery. If it changed, mark the
 review stale and restart from the new snapshot.
 
 Return findings first. Use
-[maintainer-style-study.md](references/maintainer-style-study.md) to keep them
+[maintainer-style-study.md](references/delivery/maintainer-style-study.md) to keep them
 direct and brief. Each finding must include an exact `path:line`, trigger or
 call path, current behavior, impact, and smallest fix direction. If there are
 no findings, say so briefly and name material validation gaps.
@@ -174,7 +185,7 @@ commits as an implied part of review.
 ### 8. Optionally request focused owner reviews
 
 Only when the user asks to identify or request reviewers, read
-[review-requests.md](references/review-requests.md). Rank path-matched
+[review-requests.md](references/delivery/review-requests.md). Rank path-matched
 CODEOWNERS with documented domain expertise and propose one to three focused
 reviewers with an explicit rationale.
 

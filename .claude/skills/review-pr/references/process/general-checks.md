@@ -58,7 +58,7 @@ unrelated cleanup from untouched files.
    numbers are incomplete evidence. For a new model absent from the frozen base,
    compare head with its pinned canonical reference implementation under rule 12
    instead. Follow
-   [perf-verification.md](perf-verification.md) for the full protocol.
+   [perf-verification.md](../checks/perf-verification.md) for the full protocol.
 7. Require every addition, removal, default change, or semantic change to a
    user-facing inference API or CLI to explain why it is necessary, which
    alternatives were considered, and why the chosen interface is preferable.
@@ -72,8 +72,9 @@ unrelated cleanup from untouched files.
    place hardware- or model-specific coverage in the correct CI lane. A manual
    reproduction supplements but does not replace the regression test.
 9. Require every new or materially changed recipe to follow
-   [`recipes/TEMPLATE.md`](../../../../recipes/TEMPLATE.md) and the naming and
-   layout conventions in [`recipes/README.md`](../../../../recipes/README.md).
+   [`recipes/TEMPLATE.md`](../../../../../recipes/TEMPLATE.md) and the naming and
+   layout conventions in
+   [`recipes/README.md`](../../../../../recipes/README.md).
    Complete every applicable summary, use-case, reference, hardware,
    environment, exact-command, verification, and notes section with tested,
    reproducible details; explain any intentional deviation in the PR.
@@ -81,7 +82,8 @@ unrelated cleanup from untouched files.
     execution modes, and features with production-path evidence. Update
     `docs/models/supported_models.md` and every applicable feature support or
     compatibility table; do not claim support that the PR does not validate.
-    Follow [model-addition-checklist.md](model-addition-checklist.md) for the
+    Follow
+    [model-addition-checklist.md](../checks/model-addition-checklist.md) for the
     model-specific documentation checks.
 11. Require every new model PR to add or update its in-repository model-family
     recipe under `recipes/` and its `recipes/README.md` index entry. Apply rule
@@ -93,8 +95,10 @@ unrelated cleanup from untouched files.
     checkpoint, inputs, precision, hardware, workload, and measurement method;
     provide exact commands, results, and explanations for material differences.
     Prefer a detailed timing split for each stage and explain when it is
-    unavailable. Follow [model-addition-checklist.md](model-addition-checklist.md)
-    and [perf-verification.md](perf-verification.md) for the evidence contract.
+    unavailable. Follow
+    [model-addition-checklist.md](../checks/model-addition-checklist.md) and
+    [perf-verification.md](../checks/perf-verification.md) for the evidence
+    contract.
 
 ## Blocking risk scan
 

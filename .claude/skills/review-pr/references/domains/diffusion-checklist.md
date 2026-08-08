@@ -41,7 +41,7 @@ Require evidence proportionate to the contribution:
 | New pipeline/model | Runnable production-path inference, valid sample output with parameters, representative E2E test, and model/usage docs. |
 | Runtime or lifecycle change | Focused scheduler/executor test plus failure, cancellation, and cleanup coverage for the changed state. |
 | Parallel/cache/optimization feature | Feature off/on correctness, affected topology, output-quality comparison, and exact command/environment. |
-| Performance or memory claim | Comparable base/head latency and peak memory plus quality evidence; use [perf-verification.md](perf-verification.md). |
+| Performance or memory claim | Comparable base/head latency and peak memory plus quality evidence; use [perf-verification.md](../checks/perf-verification.md). |
 
 Do not impose universal acceleration or memory-feature requirements on a model
 addition. Ask for comparison with diffusers or another known-good implementation

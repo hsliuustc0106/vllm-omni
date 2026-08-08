@@ -56,8 +56,9 @@ sample rate, or response schema.
 
 - Require every new model PR to add or update one model-family recipe under
   `recipes/<vendor>/` and its row in the `recipes/README.md` Available Recipes
-  table. Follow [`recipes/TEMPLATE.md`](../../../../recipes/TEMPLATE.md) and the
-  layout rules in [`recipes/README.md`](../../../../recipes/README.md); the
+  table. Follow [`recipes/TEMPLATE.md`](../../../../../recipes/TEMPLATE.md) and
+  the layout rules in
+  [`recipes/README.md`](../../../../../recipes/README.md); the
   external recipes repository is a structural reference, not a substitute.
 - Include only tested task, serving-mode, and hardware configurations. Keep the
   exact model identifiers, flags, commands, verification, feature support,
@@ -116,5 +117,6 @@ contract. Prefer one typed producer-consumer schema to repeated string keys.
 - Require focused registry/config/loading tests, a representative E2E path, and
   user-facing model/usage documentation.
 
-Use [diffusion-checklist.md](diffusion-checklist.md) for diffusion models and
+Use [diffusion-checklist.md](../domains/diffusion-checklist.md) for diffusion
+models and
 [perf-verification.md](perf-verification.md) for quantitative claims.

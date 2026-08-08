@@ -131,7 +131,8 @@ Write each finding as:
 <Trigger or call path>. <Current behavior and impact>. <Smallest fix direction>.
 ```
 
-Use [maintainer-style-study.md](maintainer-style-study.md) for comment tone.
+Use [maintainer-style-study.md](../delivery/maintainer-style-study.md) for
+comment tone.
 Keep rule IDs, grades, and audit matrices internal unless the user asks for the
 complete audit.
 
@@ -150,7 +151,8 @@ event (`APPROVE`, `COMMENT`, or `REQUEST_CHANGES`) only when the user explicitly
 chooses that event.
 
 Reviewer requests and owner `@mention` comments are separate external writes;
-follow [review-requests.md](review-requests.md) when the user asks for them.
+follow [review-requests.md](../delivery/review-requests.md) when the user asks
+for them.
 
 ## Re-review safely
 
