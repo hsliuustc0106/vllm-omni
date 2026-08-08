@@ -147,20 +147,25 @@ loader path.
 
 Current source-level validation includes:
 
-- component-list parsing and invalid DLO-without-`dit` rejection;
-- default/all and DiT-only encoder/VAE placement;
-- rank-local encoder block hook setup and cleanup for ordinary layerwise and DLO;
-
-- HSDP + DLO + AllGather rejection;
-- HSDP + DLO without AllGather acceptance at configuration level;
+- all legal component lists plus invalid DLO-without-`dit` rejection;
+- actual encoder/VAE placement for every ordinary and distributed combination;
+- rank-local encoder hook setup, execution, exception cleanup, and idempotent teardown;
+- packed non-row-major weight stride preservation for online-quantized kernels;
+- HSDP + DLO + AllGather rejection and no-AllGather configuration acceptance;
 - TP rejection in the DLO+AllGather mmap path;
 - resident-layer requests requiring no-AllGather;
-- DP request-wave validation for denoising-step compatibility;
-- sharding, double-buffer, AllGather-size, and heterogeneous-block regression
-  tests.
-The highest-value missing coverage is end-to-end numerical comparison against
-ordinary layerwise offload for DP+SP, TP+no-AllGather, and HSDP+SP+no-AllGather
-on the target CUDA/NCCL or CANN/HCCL hardware.
+- DP request-wave validation, failure propagation, and recovery;
+- sharding, double-buffer, AllGather-size, and heterogeneous-block regressions.
+
+Hardware-backed MiniMax-H3 validation on NVIDIA B300 covers one-GPU
+encoder-only layerwise offload, TP2 rank-local DLO in BF16 and online FP8, and
+DP2 DLO+AllGather. The 5-second, 1344x768 cases produced 124-frame video and
+32-kHz stereo audio, repeated requests, and exited without live worker
+children. These two-step cases validate placement and lifecycle, not 50-step
+quality or production latency.
+
+The highest-value remaining coverage is DP+SP and HSDP+SP no-AllGather on
+target CUDA/NCCL or CANN/HCCL hardware, plus production-step quality sweeps.
 
 ## Recommendations
 

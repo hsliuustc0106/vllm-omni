@@ -42,6 +42,7 @@ from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMetho
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 from vllm_omni.diffusion.layers.norm import RMSNorm as DiffusionRMSNorm
+from vllm_omni.diffusion.offloader.module_residency import PinnedModuleStager
 
 MINIMAX_H3_QWEN3VL_SELECTED_LM_LAYER = 50
 MINIMAX_H3_QWEN3VL_HIDDEN_DIM = 5120

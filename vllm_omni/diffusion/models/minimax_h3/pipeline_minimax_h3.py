@@ -1151,18 +1151,24 @@ class MiniMaxH3Pipeline(
         if model_level_offload:
             # Invoke nn.Module.__call__ so the generic model-level offloader
             # swaps the resident DiT and encoder.
-            return self.text_encoder(input_ids, **vision_kwargs)
+            with torch.profiler.record_function("minimax_h3.encoder.model_level_offload"):
+                return self.text_encoder(input_ids, **vision_kwargs)
 
         if should_offload_component(self.od_config, TEXT_ENCODER_COMPONENT):
-            self.text_encoder.load_to_device()
+            with torch.profiler.record_function("minimax_h3.encoder.load_to_device"):
+                self.text_encoder.load_to_device()
             try:
-                return self.text_encoder.encode_ids(input_ids, **vision_kwargs)
+                with torch.profiler.record_function("minimax_h3.encoder.encode_ids"):
+                    return self.text_encoder.encode_ids(input_ids, **vision_kwargs)
             finally:
-                self.text_encoder.offload_to_cpu()
+                with torch.profiler.record_function("minimax_h3.encoder.offload_to_cpu"):
+                    self.text_encoder.offload_to_cpu()
 
         # Keep Qwen resident when it is not selected for layerwise offload.
-        self.text_encoder.load_to_device()
-        return self.text_encoder.encode_ids(input_ids, **vision_kwargs)
+        with torch.profiler.record_function("minimax_h3.encoder.load_to_device"):
+            self.text_encoder.load_to_device()
+        with torch.profiler.record_function("minimax_h3.encoder.encode_ids"):
+            return self.text_encoder.encode_ids(input_ids, **vision_kwargs)
 
     def _uses_manual_component_offload(self) -> bool:
         od_config = getattr(self, "od_config", None)
