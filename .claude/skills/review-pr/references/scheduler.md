@@ -3,7 +3,7 @@
 Use for AR/generation request queues, token budgets, waiting/running state,
 cross-stage KV readiness, scheduling coordination, and tensor prefix cache.
 
-Official docs: [AR module design](https://docs.vllm.ai/projects/vllm-omni/en/latest/design/module/ar_module/)
+Official docs: [autoregressive runtime](https://docs.vllm.ai/projects/vllm-omni/en/latest/design/module/ar_runtime/)
 and [architecture overview](https://docs.vllm.ai/projects/vllm-omni/en/latest/design/architecture_overview/).
 
 ## Boundaries
