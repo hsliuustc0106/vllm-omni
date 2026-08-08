@@ -53,7 +53,9 @@ unrelated cleanup from untouched files.
    results under the same hardware, software, model, workload, precision,
    topology, warmup, repetitions, and measurement scope. Include exact commands,
    variability, and a correctness or quality guard; one-sided or non-comparable
-   numbers are incomplete evidence. Follow
+   numbers are incomplete evidence. For a new model absent from the frozen base,
+   compare head with its pinned canonical reference implementation under rule 12
+   instead. Follow
    [perf-verification.md](perf-verification.md) for the full protocol.
 7. Require every addition, removal, default change, or semantic change to a
    user-facing inference API or CLI to explain why it is necessary, which
@@ -83,6 +85,13 @@ unrelated cleanup from untouched files.
     9, and keep the recipe's model identifiers, tasks, serving modes, hardware,
     commands, supported features, and limitations aligned with validated PR
     evidence. An external recipe link does not replace the in-repository recipe.
+12. Require every new model to compare accuracy or output quality and performance
+    against a pinned baseline or canonical reference implementation. Match the
+    checkpoint, inputs, precision, hardware, workload, and measurement method;
+    provide exact commands, results, and explanations for material differences.
+    Prefer a detailed timing split for each stage and explain when it is
+    unavailable. Follow [model-addition-checklist.md](model-addition-checklist.md)
+    and [perf-verification.md](perf-verification.md) for the evidence contract.
 
 ## Blocking risk scan
 

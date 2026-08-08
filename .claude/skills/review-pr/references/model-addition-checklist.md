@@ -67,6 +67,31 @@ sample rate, or response schema.
   model family by default; justify a split when configurations cannot be kept
   clear in one file, and do not add placeholder sections for untested platforms.
 
+## Compare the reference implementation
+
+Require every new model PR to include a head-versus-reference accuracy or
+quality and performance comparison:
+
+- Name the canonical implementation and pin its repository revision, package
+  version, configuration, and checkpoint. If it cannot run, explain why and use
+  the closest runnable reference; do not silently omit the comparison.
+- Match inputs or dataset, seed, output settings, precision or quantization,
+  hardware, software, warmup, repetitions, synchronization, and timing and
+  memory scope. Include exact commands and environment details for both sides.
+- Compare accuracy or output quality with a task-appropriate metric and explicit
+  tolerance. When no reliable metric exists, provide paired fixed-input outputs,
+  artifacts, and evaluation criteria, and explain expected numerical or
+  qualitative differences.
+- Report end-to-end latency, task-appropriate throughput, peak device memory,
+  run-to-run variability, and head/reference ratios at equivalent output quality.
+- Prefer a timing split for preprocessing or encoding, each model stage,
+  inter-stage transfer or communication, decoding or postprocessing, and output
+  assembly. Define the boundaries, account for overlap, reconcile the split with
+  end-to-end time, and explain any unavailable stage measurement.
+
+Use [perf-verification.md](perf-verification.md) for the comparison protocol and
+repository benchmark and profiling links.
+
 ## Remove accidental surface
 
 Search bounded call sites for:
@@ -84,8 +109,6 @@ contract. Prefer one typed producer-consumer schema to repeated string keys.
 
 - Run a representative production-path inference and assert output content, not
   only process survival.
-- Compare with a known-good upstream implementation when available; fix seeds
-  and state numeric tolerances or qualitative limitations.
 - Require profiling or A/B tables when the PR makes performance, memory,
   precision, or quality claims, or when a suspected hot-path/device bug needs
   that evidence. Do not impose fixed utilization or regression thresholds that

@@ -1,14 +1,16 @@
 # Performance and Accuracy Verification
 
-Activate this reference only when the PR claims or intentionally changes
-latency, throughput, memory, scaling, precision, or output quality.
+Activate this reference when the PR adds a model or claims or intentionally
+changes latency, throughput, memory, scaling, precision, or output quality.
 
-Official docs: [profiling](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/profiling/)
-and [serving benchmarks](https://docs.vllm.ai/projects/vllm-omni/en/latest/cli/bench/serve/).
+Official docs: [profiling](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/profiling/),
+[serving benchmarks](https://docs.vllm.ai/projects/vllm-omni/en/latest/cli/bench/serve/),
+and [metrics](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/metrics/).
 
 ## Comparable A/B contract
 
-Compare frozen base and head with the same:
+Compare frozen base and head for an existing path. For a new model absent from
+base, compare head with a pinned canonical reference implementation. Use the same:
 
 - hardware, driver, software versions, model/checkpoint, and dependencies;
 - input or dataset, seed, precision, batch/concurrency, topology, and feature
@@ -24,7 +26,7 @@ smallest reproducible workload that reaches the changed production path.
 
 | Dimension | Typical evidence |
 | --- | --- |
-| Latency | End-to-end latency and, when relevant, TTFT or per-stage time. |
+| Latency | End-to-end latency and, when available, TTFT plus a defined per-stage and transfer-time split. |
 | Throughput/scaling | Requests, tokens, frames, or audio duration per second across the claimed concurrency/topology. |
 | Memory | Peak allocated/reserved device memory and OOM boundary if relevant. |
 | Quality/accuracy | Repository metric or known-good output comparison with an explicit tolerance; paired samples when no metric exists. |
