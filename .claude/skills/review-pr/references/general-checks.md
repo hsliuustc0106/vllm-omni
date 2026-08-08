@@ -78,6 +78,11 @@ unrelated cleanup from untouched files.
     compatibility table; do not claim support that the PR does not validate.
     Follow [model-addition-checklist.md](model-addition-checklist.md) for the
     model-specific documentation checks.
+11. Require every new model PR to add or update its in-repository model-family
+    recipe under `recipes/` and its `recipes/README.md` index entry. Apply rule
+    9, and keep the recipe's model identifiers, tasks, serving modes, hardware,
+    commands, supported features, and limitations aligned with validated PR
+    evidence. An external recipe link does not replace the in-repository recipe.
 
 ## Blocking risk scan
 

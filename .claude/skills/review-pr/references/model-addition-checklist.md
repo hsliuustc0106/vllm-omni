@@ -52,6 +52,21 @@ sample rate, or response schema.
   production-path tests, and PR evidence; do not copy a sibling model's support
   claims without validation.
 
+## Ship the model recipe
+
+- Require every new model PR to add or update one model-family recipe under
+  `recipes/<vendor>/` and its row in the `recipes/README.md` Available Recipes
+  table. Follow [`recipes/TEMPLATE.md`](../../../../recipes/TEMPLATE.md) and the
+  layout rules in [`recipes/README.md`](../../../../recipes/README.md); the
+  external recipes repository is a structural reference, not a substitute.
+- Include only tested task, serving-mode, and hardware configurations. Keep the
+  exact model identifiers, flags, commands, verification, feature support,
+  constraints, and limitations consistent with code, tests, examples, and the
+  support documentation.
+- Cover each validated platform in its own hardware section. Use one recipe per
+  model family by default; justify a split when configurations cannot be kept
+  clear in one file, and do not add placeholder sections for untested platforms.
+
 ## Remove accidental surface
 
 Search bounded call sites for:
