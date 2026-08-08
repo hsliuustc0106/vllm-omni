@@ -18,6 +18,30 @@ and [feature compatibility](https://docs.vllm.ai/projects/vllm-omni/en/latest/us
   feature-off, topology, and compatibility path without demanding unsupported
   modes merely for symmetry.
 
+## Module, API, and class design
+
+Apply these rules to new or materially changed production code; do not require
+unrelated cleanup from untouched files.
+
+1. Start each source module with a concise module docstring that defines its
+   responsibility and boundaries and identifies its primary classes and key
+   functions. Place it after any required license header and before imports.
+2. Give every added or materially changed class and function a clear docstring
+   covering its responsibility, parameters, return value, raised exceptions,
+   and non-obvious invariants. Use explicit typed parameters at owned API
+   boundaries; avoid opaque `**kwargs` and `Any`. Allow them only when an
+   upstream or compatibility interface requires them, and document and validate
+   the accepted keys and concrete types.
+3. Move stable helpers shared by multiple features into an appropriately scoped
+   utility module. Do not let feature modules accumulate large collections of
+   unrelated private utility functions; keep a private helper local only when
+   it is single-purpose and tightly coupled to that feature.
+4. Keep every method on a key class within that class's stated responsibility,
+   and document non-obvious design decisions and invariants. Before adding a
+   method, prefer reuse, consolidation, or extension of an existing abstraction;
+   split the class when new behavior creates a separate responsibility or makes
+   the class unnecessarily long.
+
 ## Blocking risk scan
 
 | Risk | Prove before reporting |
