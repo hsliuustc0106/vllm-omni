@@ -48,6 +48,12 @@ unrelated cleanup from untouched files.
    lifecycle behavior, alternatives and tradeoffs, validation, limitations,
    and rollout. Keep the depth proportional to the feature, but do not omit the
    design artifact for a small implementation.
+6. Require every performance PR to provide reproducible base-versus-head A/B
+   results under the same hardware, software, model, workload, precision,
+   topology, warmup, repetitions, and measurement scope. Include exact commands,
+   variability, and a correctness or quality guard; one-sided or non-comparable
+   numbers are incomplete evidence. Follow
+   [perf-verification.md](perf-verification.md) for the full protocol.
 
 ## Blocking risk scan
 
