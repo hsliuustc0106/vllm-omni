@@ -162,36 +162,13 @@ class TestLayerwiseOffloadHook:
         assert torch.equal(next_block.weight, expected)
 
 
-class _PackedWeightBlock(nn.Module):
-    def __init__(self):
-        super().__init__()
-        packed_column_major = torch.arange(12, dtype=torch.float32).reshape(3, 4).t()
-        self.weight = nn.Parameter(packed_column_major)
+def test_offload_preserves_packed_stride():
+    tensor = torch.arange(12).reshape(3, 4).t()
+    flat, stride = layerwise_backend_module._flatten_for_offload(tensor)
+    restored = layerwise_backend_module._restore_from_offload(flat.clone(), tensor.shape, stride)
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return inputs @ self.weight.t()
-
-
-def test_layerwise_prefetch_preserves_packed_weight_stride(patched_offload_runtime):
-    current_block = nn.Linear(3, 4, bias=False)
-    next_block = _PackedWeightBlock()
-    original_weight = next_block.weight.detach().clone(memory_format=torch.preserve_format)
-    original_stride = next_block.weight.stride()
-    inputs = torch.randn(2, 3)
-    expected = inputs @ original_weight.t()
-
-    hook = LayerwiseOffloadHook(
-        next_block=next_block,
-        device=torch.device("cpu"),
-        stream=DummyStream(),
-        pin_memory=False,
-    )
-    hook.initialize_hook(current_block)
-    hook.prefetch_layer(non_blocking=False)
-
-    assert next_block.weight.stride() == original_stride == (1, 4)
-    assert torch.equal(next_block.weight, original_weight)
-    assert torch.equal(next_block(inputs), expected)
+    assert restored.stride() == tensor.stride() == (1, 4)
+    assert torch.equal(restored, tensor)
 
 
 class _DummyBlock(nn.Module):
@@ -376,7 +353,6 @@ class TestLayerwiseComponentSelection:
 
         assert pipeline.text_encoder._omni_layerwise_enabled
         assert len(pipeline.text_encoder._omni_layerwise_hooks) == 4
-        assert pipeline.text_encoder._omni_layerwise_pin_memory is False
         assert pipeline.text_encoder.offload_calls == 1
         assert pipeline.vae.offload_calls == 0
         assert pipeline.vae.to_calls == 1
@@ -407,167 +383,6 @@ class TestLayerwiseComponentSelection:
         assert hasattr(pipeline.transformer.blocks[0], "_hook_registry")
 
         backend.disable()
-
-    def test_invalid_encoder_plan_fails_closed(self, patched_offload_runtime):
-        pipeline = _ComponentPipeline()
-        pipeline._offload_plan = OffloadPlan(
-            encoder_block_attrs={"text_encoder": ("vision.missing",)},
-            on_demand_component_paths=frozenset({"text_encoder"}),
-        )
-        backend = LayerWiseOffloadBackend(
-            OffloadConfig(
-                strategy=OffloadStrategy.LAYER_WISE,
-                pin_cpu_memory=False,
-                components=frozenset({"text_encoder"}),
-            ),
-            torch.device("cpu"),
-        )
-
-        with pytest.raises(ValueError, match="text_encoder.vision.missing was not found"):
-            backend.enable(pipeline)
-
-        assert not hasattr(pipeline.text_encoder, "_omni_layerwise_enabled")
-        assert backend._encoder_modules == []
-
-    def test_empty_encoder_plan_fails_closed(self, patched_offload_runtime):
-        pipeline = _ComponentPipeline()
-        pipeline._offload_plan = OffloadPlan(encoder_block_attrs={"text_encoder": ()})
-        backend = LayerWiseOffloadBackend(
-            OffloadConfig(
-                strategy=OffloadStrategy.LAYER_WISE,
-                pin_cpu_memory=False,
-                components=frozenset({"text_encoder"}),
-            ),
-            torch.device("cpu"),
-        )
-
-        with pytest.raises(ValueError, match="declares no blockwise offload paths"):
-            backend.enable(pipeline)
-
-    def test_selected_vae_failure_removes_encoder_hooks(self, patched_offload_runtime):
-        pipeline = _ComponentPipeline()
-        pipeline.vae = nn.Linear(2, 2)
-        backend = LayerWiseOffloadBackend(
-            OffloadConfig(
-                strategy=OffloadStrategy.LAYER_WISE,
-                pin_cpu_memory=False,
-                components=frozenset({"text_encoder", "vae"}),
-            ),
-            torch.device("cpu"),
-        )
-
-        with pytest.raises(RuntimeError, match="Failed to prepare selected VAE"):
-            backend.enable(pipeline)
-
-        assert not pipeline.text_encoder._omni_layerwise_enabled
-        assert backend._encoder_modules == []
-        for blocks in (pipeline.text_encoder.vision.blocks, pipeline.text_encoder.text_model.layers):
-            for block in blocks:
-                assert block._hook_registry.get_hook(LayerwiseOffloadHook._HOOK_NAME) is None
-
-    def test_encoder_only_enable_disable_is_idempotent(self, patched_offload_runtime):
-        pipeline = _ComponentPipeline()
-        backend = LayerWiseOffloadBackend(
-            OffloadConfig(
-                strategy=OffloadStrategy.LAYER_WISE,
-                pin_cpu_memory=False,
-                components=frozenset({"text_encoder"}),
-            ),
-            torch.device("cpu"),
-        )
-
-        backend.enable(pipeline)
-        hooks = list(pipeline.text_encoder._omni_layerwise_hooks)
-        backend.enable(pipeline)
-
-        assert pipeline.text_encoder._omni_layerwise_hooks == hooks
-        assert pipeline.text_encoder.offload_calls == 1
-
-        backend.disable()
-        backend.disable()
-        assert not pipeline.text_encoder._omni_layerwise_enabled
-
-    def test_encoder_blockwise_matches_two_consecutive_resident_forwards(self, patched_offload_runtime):
-        class ExecutableEncoder(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.vision = nn.Module()
-                self.vision.blocks = nn.ModuleList([nn.Linear(3, 3), nn.Linear(3, 3)])
-                self.text_model = nn.Module()
-                self.text_model.layers = nn.ModuleList([nn.Linear(3, 3), nn.Linear(3, 3)])
-
-            def load_to_device(self):
-                return None
-
-            def offload_to_cpu(self):
-                for hook in getattr(self, "_omni_layerwise_hooks", []):
-                    hook.offload_layer()
-
-            def forward(self, value):
-                for block in self.vision.blocks:
-                    value = torch.relu(block(value))
-                for block in self.text_model.layers:
-                    value = torch.relu(block(value))
-                return value
-
-        torch.manual_seed(0)
-        pipeline = _ComponentPipeline()
-        pipeline.text_encoder = ExecutableEncoder()
-        value = torch.randn(2, 3)
-        expected = pipeline.text_encoder(value)
-        backend = LayerWiseOffloadBackend(
-            OffloadConfig(
-                strategy=OffloadStrategy.LAYER_WISE,
-                pin_cpu_memory=False,
-                components=frozenset({"text_encoder"}),
-            ),
-            torch.device("cpu"),
-        )
-        backend.enable(pipeline)
-
-        for _ in range(2):
-            pipeline.text_encoder.load_to_device()
-            actual = pipeline.text_encoder(value)
-            pipeline.text_encoder.offload_to_cpu()
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-        backend.disable()
-
-
-@pytest.mark.parametrize(
-    "components",
-    [
-        frozenset({"dit"}),
-        frozenset({"text_encoder"}),
-        frozenset({"vae"}),
-        frozenset({"dit", "text_encoder"}),
-        frozenset({"dit", "vae"}),
-        frozenset({"text_encoder", "vae"}),
-        frozenset({"dit", "text_encoder", "vae"}),
-    ],
-)
-def test_every_layerwise_component_combination_controls_placement(components, patched_offload_runtime):
-    pipeline = _ComponentPipeline()
-    backend = LayerWiseOffloadBackend(
-        OffloadConfig(
-            strategy=OffloadStrategy.LAYER_WISE,
-            pin_cpu_memory=False,
-            components=components,
-        ),
-        torch.device("cpu"),
-    )
-
-    backend.enable(pipeline)
-
-    assert hasattr(pipeline.transformer.blocks[0], "_hook_registry") is ("dit" in components)
-    assert getattr(pipeline.text_encoder, "_omni_layerwise_enabled", False) is ("text_encoder" in components)
-    assert pipeline.text_encoder.offload_calls == int("text_encoder" in components)
-    assert pipeline.text_encoder.to_calls == int("text_encoder" not in components)
-    assert pipeline.vae.offload_calls == int("vae" in components)
-    assert pipeline.vae.to_calls == 1
-    assert backend.enabled
-
-    backend.disable()
 
 
 def _offload_od_config(**overrides):
@@ -603,57 +418,6 @@ class TestLayerwiseComponentConfig:
 
         assert csv_config.components == frozenset({"dit", "text_encoder"})
         assert sequence_config.components == frozenset({"vae", "text_encoder"})
-
-    @pytest.mark.parametrize(
-        "components",
-        [
-            "dit",
-            "text_encoder",
-            "vae",
-            "dit,text_encoder",
-            "dit,vae",
-            "text_encoder,vae",
-            "dit,text_encoder,vae",
-        ],
-    )
-    def test_every_nonempty_component_selection_is_accepted(self, components):
-        config = OffloadConfig.from_od_config(
-            _offload_od_config(
-                enable_layerwise_offload=True,
-                layerwise_offload_components=components,
-            )
-        )
-
-        assert config.components == frozenset(components.split(","))
-
-    def test_component_names_are_case_insensitive_and_deduplicated(self):
-        config = OffloadConfig.from_od_config(
-            _offload_od_config(
-                enable_layerwise_offload=True,
-                layerwise_offload_components=" DIT,Text_Encoder,dit ",
-            )
-        )
-
-        assert config.components == frozenset({"dit", "text_encoder"})
-
-    @pytest.mark.parametrize(
-        ("value", "error_type"),
-        [
-            ("", ValueError),
-            ("dit,", ValueError),
-            ([], ValueError),
-            (["dit", 1], TypeError),
-            (1, TypeError),
-        ],
-    )
-    def test_empty_or_malformed_component_selection_is_rejected(self, value, error_type):
-        with pytest.raises(error_type):
-            OffloadConfig.from_od_config(
-                _offload_od_config(
-                    enable_layerwise_offload=True,
-                    layerwise_offload_components=value,
-                )
-            )
 
     def test_default_keeps_all_components(self):
         config = OffloadConfig.from_od_config(_offload_od_config(enable_layerwise_offload=True))

@@ -88,21 +88,6 @@ This path is intentionally not implemented by reusing the AllGather mmap
 loader. It relies on the standard loader so model-specific TP/HSDP transforms
 remain intact.
 
-## Component placement
-
-`--layerwise-offload-components` accepts `dit`, `text_encoder`, and `vae`.
-Omitting it selects all supported components. DLO requires `dit`, because its
-request synchronization, double buffers, and optional AllGather schedule are
-owned by the DiT block sequence. Encoder-only or VAE-only placement uses the
-ordinary layerwise backend instead.
-
-DiT blocks use `DistributedLayerwiseOffloadHook`. Encoders declared through
-`OffloadPlan.encoder_block_attrs` deliberately use the ordinary rank-local
-`LayerwiseOffloadHook`; this preserves an encoder's existing TP shard and does
-not add it to the DiT AllGather group. Planned encoder and VAE components in
-`on_demand_component_paths` are moved only around the model's encode/decode
-phase. Unselected components remain accelerator-resident.
-
 ## Parallelism compatibility
 
 | Parallelism | DLO + AllGather | DLO without AllGather |
@@ -147,25 +132,17 @@ loader path.
 
 Current source-level validation includes:
 
-- all legal component lists plus invalid DLO-without-`dit` rejection;
-- actual encoder/VAE placement for every ordinary and distributed combination;
-- rank-local encoder hook setup, execution, exception cleanup, and idempotent teardown;
-- packed non-row-major weight stride preservation for online-quantized kernels;
-- HSDP + DLO + AllGather rejection and no-AllGather configuration acceptance;
+- HSDP + DLO + AllGather rejection;
+- HSDP + DLO without AllGather acceptance at configuration level;
 - TP rejection in the DLO+AllGather mmap path;
 - resident-layer requests requiring no-AllGather;
-- DP request-wave validation, failure propagation, and recovery;
-- sharding, double-buffer, AllGather-size, and heterogeneous-block regressions.
+- DP request-wave validation for denoising-step compatibility;
+- sharding, double-buffer, AllGather-size, and heterogeneous-block regression
+  tests.
 
-Hardware-backed MiniMax-H3 validation on NVIDIA B300 covers one-GPU
-encoder-only layerwise offload, TP2 rank-local DLO in BF16 and online FP8, and
-DP2 DLO+AllGather. The 5-second, 1344x768 cases produced 124-frame video and
-32-kHz stereo audio, repeated requests, and exited without live worker
-children. These two-step cases validate placement and lifecycle, not 50-step
-quality or production latency.
-
-The highest-value remaining coverage is DP+SP and HSDP+SP no-AllGather on
-target CUDA/NCCL or CANN/HCCL hardware, plus production-step quality sweeps.
+The highest-value missing coverage is end-to-end numerical comparison against
+ordinary layerwise offload for DP+SP, TP+no-AllGather, and HSDP+SP+no-AllGather
+on the target CUDA/NCCL or CANN/HCCL hardware.
 
 ## Recommendations
 

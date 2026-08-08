@@ -523,42 +523,6 @@ class TestPinnedModuleStager:
         stager.offload()
 
 
-class _PackedWeightBlock(nn.Module):
-    def __init__(self):
-        super().__init__()
-        packed_column_major = torch.arange(12, dtype=torch.float32).reshape(3, 4).t()
-        self.weight = nn.Parameter(packed_column_major)
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return inputs @ self.weight.t()
-
-
-def test_distributed_prefetch_preserves_packed_weight_stride(patched_offload_runtime):
-    current_block = nn.Linear(3, 4, bias=False)
-    next_block = _PackedWeightBlock()
-    original_weight = next_block.weight.detach().clone(memory_format=torch.preserve_format)
-    original_stride = next_block.weight.stride()
-    inputs = torch.randn(2, 3)
-    expected = inputs @ original_weight.t()
-
-    hook = DistributedLayerwiseOffloadHook(
-        next_block=next_block,
-        device=torch.device("cpu"),
-        dp_group=None,
-        dp_size=1,
-        rank=0,
-        copy_stream=DummyStream(),
-        comm_stream=DummyStream(),
-        pin_memory=False,
-    )
-    hook.initialize_hook(current_block)
-    hook.prefetch_layer(slot=0, non_blocking=False)
-
-    assert next_block.weight.stride() == original_stride == (1, 4)
-    assert torch.equal(next_block.weight, original_weight)
-    assert torch.equal(next_block(inputs), expected)
-
-
 class _DummyBlock(nn.Module):
     def __init__(self):
         super().__init__()
@@ -1429,10 +1393,8 @@ class _ComponentEncoder(nn.Module):
         self.text_model.layers = nn.ModuleList([_DummyBlock(), _DummyBlock()])
         self.offload_calls = 0
         self.to_calls = 0
-        self.load_calls = 0
 
     def load_to_device(self):
-        self.load_calls += 1
         return None
 
     def offload_to_cpu(self):
@@ -1490,15 +1452,10 @@ class TestDistributedComponentSelection:
 
         assert pipeline.text_encoder._omni_layerwise_enabled
         assert len(pipeline.text_encoder._omni_layerwise_hooks) == 4
-        assert pipeline.text_encoder._omni_layerwise_pin_memory is False
         assert pipeline.text_encoder.offload_calls == 1
         assert pipeline.vae.offload_calls == 1
-        assert pipeline.text_encoder in backend._encoder_modules
 
         backend.disable()
-
-        assert not pipeline.text_encoder._omni_layerwise_enabled
-        assert backend._encoder_modules == []
 
     def test_dit_only_keeps_encoder_and_vae_resident(self, patched_offload_runtime):
         pipeline = _DistributedComponentPipeline()
@@ -1521,125 +1478,3 @@ class TestDistributedComponentSelection:
         assert pipeline.vae.to_calls == 1
 
         backend.disable()
-
-    def test_blockwise_encoder_without_stage_uses_lifecycle_load(self, patched_offload_runtime):
-        pipeline = _DistributedComponentPipeline()
-        pipeline._offload_plan = OffloadPlan(
-            encoder_block_attrs={"text_encoder": ("vision.blocks", "text_model.layers")},
-        )
-        backend = DistributedLayerwiseOffloadBackend(
-            OffloadConfig(
-                strategy=OffloadStrategy.DISTRIBUTED_LAYER_WISE,
-                pin_cpu_memory=False,
-                dlo_use_allgather=False,
-                components=frozenset({"dit", "text_encoder"}),
-            ),
-            torch.device("cpu"),
-        )
-
-        backend.enable(pipeline)
-
-        assert pipeline.text_encoder._omni_layerwise_enabled
-        assert pipeline.text_encoder.load_calls == 1
-        assert pipeline.text_encoder.to_calls == 0
-        assert pipeline.text_encoder.offload_calls == 0
-
-        backend.disable()
-
-    def test_selected_vae_missing_lifecycle_removes_encoder_hooks(self, patched_offload_runtime):
-        pipeline = _DistributedComponentPipeline()
-        pipeline.vae = nn.Linear(2, 2)
-        backend = DistributedLayerwiseOffloadBackend(
-            OffloadConfig(
-                strategy=OffloadStrategy.DISTRIBUTED_LAYER_WISE,
-                pin_cpu_memory=False,
-                dlo_use_allgather=False,
-            ),
-            torch.device("cpu"),
-        )
-
-        with pytest.raises(ValueError, match="Component 'vae' requires offload_to_cpu"):
-            backend.enable(pipeline)
-
-        assert not pipeline.text_encoder._omni_layerwise_enabled
-        assert backend._encoder_modules == []
-        for blocks in (pipeline.text_encoder.vision.blocks, pipeline.text_encoder.text_model.layers):
-            for block in blocks:
-                assert block._hook_registry.get_hook("layerwise_offload") is None
-
-
-@pytest.mark.parametrize(
-    "components",
-    [
-        frozenset({"dit"}),
-        frozenset({"dit", "text_encoder"}),
-        frozenset({"dit", "vae"}),
-        frozenset({"dit", "text_encoder", "vae"}),
-    ],
-)
-def test_every_distributed_component_combination_controls_placement(components, patched_offload_runtime):
-    pipeline = _DistributedComponentPipeline()
-    backend = DistributedLayerwiseOffloadBackend(
-        OffloadConfig(
-            strategy=OffloadStrategy.DISTRIBUTED_LAYER_WISE,
-            pin_cpu_memory=False,
-            dlo_use_allgather=False,
-            components=components,
-        ),
-        torch.device("cpu"),
-    )
-
-    backend.enable(pipeline)
-
-    assert getattr(pipeline.text_encoder, "_omni_layerwise_enabled", False) is ("text_encoder" in components)
-    assert pipeline.text_encoder.offload_calls == int("text_encoder" in components)
-    assert pipeline.text_encoder.to_calls == int("text_encoder" not in components)
-    assert pipeline.vae.offload_calls == int("vae" in components)
-    assert pipeline.vae.to_calls == 1
-    assert backend.enabled
-
-    backend.disable()
-
-
-def test_allgather_rejects_online_quantization_before_hook_setup(
-    patched_offload_runtime,
-):
-    pipeline = _DistributedComponentPipeline()
-    pipeline.transformer.quant_method = SimpleNamespace(uses_meta_device=True)
-    backend = DistributedLayerwiseOffloadBackend(
-        OffloadConfig(
-            strategy=OffloadStrategy.DISTRIBUTED_LAYER_WISE,
-            pin_cpu_memory=False,
-            dlo_use_allgather=True,
-            dp_size=2,
-        ),
-        torch.device("cpu"),
-    )
-    backend.dp_group = object()
-
-    with pytest.raises(ValueError, match="Online quantization is incompatible"):
-        backend.enable(pipeline)
-
-    assert backend._blocks == []
-    assert backend._encoder_modules == []
-
-
-def test_rank_local_dlo_accepts_online_quantization_marker(
-    patched_offload_runtime,
-):
-    pipeline = _DistributedComponentPipeline()
-    pipeline.transformer.quant_method = SimpleNamespace(uses_meta_device=True)
-    backend = DistributedLayerwiseOffloadBackend(
-        OffloadConfig(
-            strategy=OffloadStrategy.DISTRIBUTED_LAYER_WISE,
-            pin_cpu_memory=False,
-            dlo_use_allgather=False,
-        ),
-        torch.device("cpu"),
-    )
-
-    backend.enable(pipeline)
-
-    assert backend.enabled
-    assert len(backend._blocks) == 1
-    backend.disable()

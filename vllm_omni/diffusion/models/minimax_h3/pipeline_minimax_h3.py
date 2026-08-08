@@ -1139,36 +1139,23 @@ class MiniMaxH3Pipeline(
         input_ids: torch.Tensor,
         vision_kwargs: dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        model_level_offload = bool(
-            self.od_config.enable_cpu_offload
-            and not self.od_config.enable_layerwise_offload
-            and not getattr(
-                self.od_config,
-                "enable_distributed_layerwise_offload",
-                False,
-            )
-        )
-        if model_level_offload:
+        if self.od_config.enable_cpu_offload and not getattr(
+            self.od_config, "enable_distributed_layerwise_offload", False
+        ):
             # Invoke nn.Module.__call__ so the generic model-level offloader
             # swaps the resident DiT and encoder.
-            with torch.profiler.record_function("minimax_h3.encoder.model_level_offload"):
-                return self.text_encoder(input_ids, **vision_kwargs)
+            return self.text_encoder(input_ids, **vision_kwargs)
 
         if should_offload_component(self.od_config, TEXT_ENCODER_COMPONENT):
-            with torch.profiler.record_function("minimax_h3.encoder.load_to_device"):
-                self.text_encoder.load_to_device()
+            self.text_encoder.load_to_device()
             try:
-                with torch.profiler.record_function("minimax_h3.encoder.encode_ids"):
-                    return self.text_encoder.encode_ids(input_ids, **vision_kwargs)
+                return self.text_encoder.encode_ids(input_ids, **vision_kwargs)
             finally:
-                with torch.profiler.record_function("minimax_h3.encoder.offload_to_cpu"):
-                    self.text_encoder.offload_to_cpu()
+                self.text_encoder.offload_to_cpu()
 
         # Keep Qwen resident when it is not selected for layerwise offload.
-        with torch.profiler.record_function("minimax_h3.encoder.load_to_device"):
-            self.text_encoder.load_to_device()
-        with torch.profiler.record_function("minimax_h3.encoder.encode_ids"):
-            return self.text_encoder.encode_ids(input_ids, **vision_kwargs)
+        self.text_encoder.load_to_device()
+        return self.text_encoder.encode_ids(input_ids, **vision_kwargs)
 
     def _uses_manual_component_offload(self) -> bool:
         od_config = getattr(self, "od_config", None)

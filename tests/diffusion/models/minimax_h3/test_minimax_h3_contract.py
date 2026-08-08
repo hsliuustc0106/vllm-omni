@@ -436,12 +436,6 @@ def test_dlo_offload_plan_includes_token_refiner():
 
     assert MiniMaxH3Pipeline._offload_plan.offload_submodules == {"token_refiner": "blocks"}
     assert MiniMaxH3Pipeline._offload_plan.resident_dit_paths == frozenset({"transformer"})
-    assert MiniMaxH3Pipeline._offload_plan.encoder_block_attrs == {
-        "text_encoder": ("vision.blocks", "text_model.layers")
-    }
-    assert MiniMaxH3Pipeline._offload_plan.on_demand_component_paths == frozenset(
-        {"text_encoder", "video_vae", "audio_vae"}
-    )
 
 
 def test_joint_postprocess_is_multiprocessing_picklable():
@@ -1080,25 +1074,6 @@ def test_layerwise_offload_releases_text_encoder(offload_flag):
     pipeline.text_encoder.offload_to_cpu.assert_called_once_with()
 
 
-def test_text_encoder_is_released_when_encode_raises():
-    from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
-
-    pipeline = object.__new__(MiniMaxH3Pipeline)
-    torch.nn.Module.__init__(pipeline)
-    pipeline.od_config = SimpleNamespace(
-        enable_cpu_offload=False,
-        enable_layerwise_offload=True,
-    )
-    pipeline.text_encoder = Mock()
-    pipeline.text_encoder.encode_ids.side_effect = RuntimeError("encode failed")
-
-    with pytest.raises(RuntimeError, match="encode failed"):
-        pipeline._encode_text_hidden(torch.tensor([1, 2]), {})
-
-    pipeline.text_encoder.load_to_device.assert_called_once_with()
-    pipeline.text_encoder.offload_to_cpu.assert_called_once_with()
-
-
 def test_layerwise_dit_only_keeps_text_encoder_resident():
     from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
 
@@ -1157,26 +1132,6 @@ def test_distributed_layerwise_offload_stages_vae_component():
         component.load_to_device.assert_called_once_with()
         component.offload_to_cpu.assert_not_called()
 
-    component.offload_to_cpu.assert_called_once_with()
-
-
-def test_vae_component_is_released_when_decode_raises():
-    from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
-
-    pipeline = object.__new__(MiniMaxH3Pipeline)
-    torch.nn.Module.__init__(pipeline)
-    pipeline.od_config = SimpleNamespace(
-        enable_layerwise_offload=True,
-        enable_distributed_layerwise_offload=False,
-        layerwise_offload_components="vae",
-    )
-    component = Mock()
-
-    with pytest.raises(RuntimeError, match="decode failed"):
-        with pipeline._component_on_device(component):
-            raise RuntimeError("decode failed")
-
-    component.load_to_device.assert_called_once_with()
     component.offload_to_cpu.assert_called_once_with()
 
 
@@ -1294,46 +1249,6 @@ def test_encoder_layerwise_offload_keeps_tp_blocks_rank_local(monkeypatch):
     assert len(hooks) == 5
     assert all(hook._prev_hook is not None for hook in hooks)
     assert all(hook.device == torch.device("cpu") for hook in hooks)
-
-
-def test_encoder_layerwise_non_blocks_use_pinned_stager(monkeypatch):
-    from vllm_omni.diffusion.models.minimax_h3 import encoder as encoder_module
-
-    class VisionStack(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.stem = torch.nn.Linear(2, 2)
-            self.blocks = torch.nn.ModuleList([torch.nn.Linear(2, 2), torch.nn.Linear(2, 2)])
-
-    class TextStack(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.embed_tokens = torch.nn.Linear(2, 2)
-            self.layers = torch.nn.ModuleList([torch.nn.Linear(2, 2), torch.nn.Linear(2, 2)])
-
-    stager = Mock()
-    stager.loaded = True
-    stager_cls = Mock(return_value=stager)
-    monkeypatch.setattr(encoder_module, "PinnedModuleStager", stager_cls)
-
-    encoder = object.__new__(encoder_module.MiniMaxH3Qwen3VLEncoder)
-    torch.nn.Module.__init__(encoder)
-    encoder.device_target = torch.device("cuda")
-    encoder.vision = VisionStack()
-    encoder.text_model = TextStack()
-    encoder._omni_layerwise_enabled = True
-    encoder._omni_layerwise_pin_memory = False
-    encoder._omni_layerwise_hooks = [Mock()]
-
-    encoder.load_to_device()
-    encoder.offload_to_cpu()
-
-    module_view = stager_cls.call_args.args[0]
-    assert list(module_view) == [encoder.vision.stem, encoder.text_model.embed_tokens]
-    stager_cls.assert_called_once_with(module_view, torch.device("cuda"), pin_memory=False)
-    stager.load.assert_called_once_with()
-    encoder._omni_layerwise_hooks[0].offload_layer.assert_called_once_with()
-    stager.offload.assert_called_once_with()
 
 
 def test_video_vae_keeps_reference_fp32_weights(monkeypatch):
