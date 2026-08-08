@@ -128,6 +128,9 @@ validation; do not post preliminary or incremental comments. Submit a review
 event (`APPROVE`, `COMMENT`, or `REQUEST_CHANGES`) only when the user explicitly
 chooses that event.
 
+Reviewer requests and owner `@mention` comments are separate external writes;
+follow [review-requests.md](review-requests.md) when the user asks for them.
+
 Before finalizing Direct mode, call `validate_direct_review` with
 `final_comment_count=1` and:
 

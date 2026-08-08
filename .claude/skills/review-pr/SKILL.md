@@ -1,6 +1,6 @@
 ---
 name: review-pr
-description: Review pull requests and local branches for vllm-project/vllm-omni with a frozen diff, InferMatrixCopilot routing, a vLLM-Omni blocker scan, targeted validation, and concise evidence-backed findings. Use for default, detailed, or repeat maintainer reviews and for checking correctness, compatibility, tests, benchmarks, model additions, distributed changes, or breaking behavior. Use precheck-pr instead for an author's pre-submit self-check.
+description: Review pull requests and local branches for vllm-project/vllm-omni with a frozen diff, InferMatrixCopilot routing, owner-specific rules, targeted validation, and concise evidence-backed findings. Use for default, detailed, or repeat maintainer reviews; checking correctness, compatibility, tests, benchmarks, model additions, distributed changes, or breaking behavior; and identifying or explicitly requesting the most relevant code-owner reviewers. Use precheck-pr instead for an author's pre-submit self-check.
 ---
 
 # Review vLLM-Omni Pull Requests
@@ -40,9 +40,10 @@ InferMatrix Direct remains the default; use Strict only when explicitly asked.
 
 ## Reference guide
 
-Read [review-execution.md](references/review-execution.md) for every review.
-After the diff census, read [review-routing.md](references/review-routing.md),
-then load only the references selected for the changed behavior:
+Read [review-execution.md](references/review-execution.md) and
+[general-checks.md](references/general-checks.md) for every review. After the
+diff census, read [review-routing.md](references/review-routing.md), select one
+primary owner, and load a second owner only for a real cross-boundary call path.
 
 Each concise reference links to the maintained
 [vLLM-Omni documentation](https://docs.vllm.ai/projects/vllm-omni/en/latest/).
@@ -50,17 +51,29 @@ For branch-specific behavior, inspect the matching `docs/` file in the reviewed
 checkout first; use the published latest docs for current guidance and discovery.
 If docs and live code disagree, verify the code/tests and report the drift.
 
+### Primary owners
+
 | Reference | Read when |
 | --- | --- |
-| [architecture.md](references/architecture.md) | Ownership, configuration, orchestration, connector, or cross-stage boundaries change. |
-| [blocker-patterns.md](references/blocker-patterns.md) | Production code adds a known correctness, lifecycle, compatibility, or security risk. |
+| [configuration.md](references/configuration.md) | Config construction, deploy YAML, schema, defaults, registry, or topology changes. |
+| [serving.md](references/serving.md) | Entrypoints, request/response behavior, streaming, orchestration, or engine lifecycle changes. |
+| [model-executor.md](references/model-executor.md) | Model loading, stage inputs, runners, workers, or device startup changes. |
 | [diffusion-checklist.md](references/diffusion-checklist.md) | A diffusion pipeline, model, scheduler, cache, or feature changes. |
-| [maintainer-style-study.md](references/maintainer-style-study.md) | Findings are ready for concise maintainer-style delivery. |
+| [distributed.md](references/distributed.md) | Connectors, KV transfer, collectives, routing, or cross-stage communication changes. |
+| [scheduler.md](references/scheduler.md) | Request state, token budgets, KV readiness, or prefix-cache behavior changes. |
+
+### Cross-cutting references
+
+| Reference | Read when |
+| --- | --- |
 | [model-addition-checklist.md](references/model-addition-checklist.md) | A model, architecture, loader, processor, registry, or stage config is added. |
+| [platform-checks.md](references/platform-checks.md) | Hardware, kernel, attention backend, quantization, or vendor code changes. |
 | [perf-verification.md](references/perf-verification.md) | The PR makes a latency, throughput, memory, or quality claim. |
 | [test-quality-evaluation.md](references/test-quality-evaluation.md) | Tests change, are absent for risky code, or may not exercise production behavior. |
 | [tests-docs-checklist.md](references/tests-docs-checklist.md) | Coverage, CI markers, examples, user docs, or PR evidence need review. |
 | [verification.md](references/verification.md) | Hardware, a server, or a runnable affected path is available for active verification. |
+| [maintainer-style-study.md](references/maintainer-style-study.md) | Findings are ready for concise maintainer-style delivery. |
+| [review-requests.md](references/review-requests.md) | The user asks to identify, suggest, request, or ping code-owner reviewers. |
 
 ## Workflow
 
@@ -103,14 +116,8 @@ from the PR description without tracing the live code.
 
 ### 4. Run the blocker scan
 
-Audit these categories internally before lower-priority comments:
-
-1. correctness;
-2. reliability and lifecycle safety;
-3. breaking API, config, or default behavior;
-4. test and validation evidence;
-5. user-facing documentation;
-6. security and data exposure.
+Apply every category in [general-checks.md](references/general-checks.md) before
+lower-priority comments.
 
 For each changed value or behavior, trace:
 
@@ -126,9 +133,10 @@ sibling implementations rather than assuming the changed hunk is the only path.
 ### 5. Apply the selected domain checks
 
 Use [review-routing.md](references/review-routing.md) to choose the smallest
-applicable reference set and any existing repo-local domain skill. Inspect both
-sides of any config, registry, serialization, connector, cache, or stage
-boundary.
+applicable reference set and any existing repo-local domain skill. Select the
+primary owner from the claimed behavior and live consumer; use changed paths to
+validate, not replace, that decision. Inspect both sides of any config,
+registry, serialization, connector, cache, or stage boundary.
 
 When a diff adds or expands a helper, class, fallback, compatibility branch, or
 public behavior, run a subtraction pass: remove out-of-scope behavior and check
@@ -170,3 +178,16 @@ no findings, say so briefly and name material validation gaps.
 Keep the review read-only unless the user explicitly authorizes posting. Do not
 submit `APPROVE`, `COMMENT`, or `REQUEST_CHANGES`, add labels, edit code, or push
 commits as an implied part of review.
+
+### 8. Optionally request focused owner reviews
+
+Only when the user asks to identify or request reviewers, read
+[review-requests.md](references/review-requests.md). Rank path-matched
+CODEOWNERS with documented domain expertise and propose one to three focused
+reviewers with an explicit rationale.
+
+Identifying or suggesting reviewers is read-only. Requesting reviewers or
+posting `@mention` comments changes external state and requires explicit user
+authorization. When authorized, recheck the head, deduplicate existing
+requests, and post at most one consolidated comment. Do not infer this
+permission from a request to review the code.

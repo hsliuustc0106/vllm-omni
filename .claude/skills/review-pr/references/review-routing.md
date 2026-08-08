@@ -1,29 +1,45 @@
 # vLLM-Omni Review Routing
 
-Use this reference after the diff census. Select only the rows supported by the
-changed files and claims; one primary domain plus one cross-cutting domain is
-usually enough.
+Use after the diff census. Apply the general checks first, choose one primary
+behavior owner, add a second only when the live call chain crosses its boundary,
+then select any cross-cutting overlays. Title prefixes are hints, not routes.
 
 Official docs: [design documents](https://docs.vllm.ai/projects/vllm-omni/en/latest/design/),
 [model contribution guides](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/model/),
 and [feature compatibility](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/feature_compatibility/).
 
-| Signal | Load | Optional repo-local skill |
-| --- | --- | --- |
-| Config, orchestration, connector, scheduler, cache, or cross-stage change | [architecture.md](architecture.md), then [blocker-patterns.md](blocker-patterns.md) if a risk signal appears | [`precheck-pr` code-quality patterns](../../precheck-pr/references/code-quality.md) |
-| New or changed model, registry, processor, loader, or stage config | [model-addition-checklist.md](model-addition-checklist.md) | [`add-tts-model`](../../add-tts-model/SKILL.md) for TTS |
-| Diffusion pipeline, model, scheduler, latent, cache, or parallel feature | [diffusion-checklist.md](diffusion-checklist.md) | [`add-diffusion-model`](../../add-diffusion-model/SKILL.md) |
-| Latency, throughput, memory, acceleration, or quality claim | [perf-verification.md](perf-verification.md) | [`diffusion-perf-opt`](../../diffusion-perf-opt/SKILL.md) for diffusion |
-| Tests changed, missing, or test-only | [test-quality-evaluation.md](test-quality-evaluation.md) and, when docs/CI evidence matters, [tests-docs-checklist.md](tests-docs-checklist.md) | [`vllm-omni-test`](../../vllm-omni-test/SKILL.md) |
-| Runnable affected path and suitable hardware/server available | [verification.md](verification.md) | None |
-| Quantization, dtype, scales, or weight mapping | [blocker-patterns.md](blocker-patterns.md) | [`quantization`](../../quantization/SKILL.md) |
-| Ascend/NPU runner or platform change | [architecture.md](architecture.md) and [verification.md](verification.md) | [`vllm-omni-npu-upgrade`](../../vllm-omni-npu-upgrade/SKILL.md) |
-| Findings ready for delivery | [maintainer-style-study.md](maintainer-style-study.md) | None |
+## Primary owner
 
-For a bug fix or public/config change, also use the relevant
-[`precheck-pr` evidence checklist](../../precheck-pr/references/checklists.md).
-If a linked skill is absent, continue with live code and tests; do not import a
-replacement from another branch.
+| Owner | Claim and live-consumer signals | Read |
+| --- | --- | --- |
+| Configuration | Schema, defaults, deploy/pipeline construction, registry, CLI projection, topology | [configuration.md](configuration.md) |
+| Serving | Public request/response, CLI/API, streaming, output assembly, orchestration, engine lifecycle | [serving.md](serving.md) |
+| Model Executor | Loader, stage input, worker/runner, device startup, AR model execution or data bridge | [model-executor.md](model-executor.md) |
+| Diffusion | Shared pipeline/denoise loop, diffusion scheduler, latent, VAE/DiT, cache, offload or parallelism | [diffusion-checklist.md](diffusion-checklist.md) |
+| Distributed | Connector, KV transfer, collective, load balancing, route/port or cross-stage transport | [distributed.md](distributed.md) |
+| Scheduler | Request queue/state, token budget, KV/input readiness, scheduling coordination or prefix cache | [scheduler.md](scheduler.md) |
+
+Use changed files to validate the selected owner and find both sides of a
+boundary. For tests-, docs-, or CI-only PRs, route to the production behavior
+they protect; use only general checks and the delivery overlay when no such
+behavior exists.
+
+## Cross-cutting overlays
+
+| Signal | Read | Optional repo-local skill |
+| --- | --- | --- |
+| New or expanded model, loader, processor, registry, or stage config | [model-addition-checklist.md](model-addition-checklist.md) | [`add-tts-model`](../../add-tts-model/SKILL.md) or [`add-diffusion-model`](../../add-diffusion-model/SKILL.md) |
+| Accelerator, kernel, attention backend, quantization, dtype, scales, or vendor path | [platform-checks.md](platform-checks.md) and, if runnable, [verification.md](verification.md) | [`quantization`](../../quantization/SKILL.md) or [`vllm-omni-npu-upgrade`](../../vllm-omni-npu-upgrade/SKILL.md) |
+| Latency, throughput, memory, scaling, precision, or quality claim | [perf-verification.md](perf-verification.md) | [`diffusion-perf-opt`](../../diffusion-perf-opt/SKILL.md) for diffusion |
+| Tests changed, absent for risky behavior, or test-only | [test-quality-evaluation.md](test-quality-evaluation.md) | [`vllm-omni-test`](../../vllm-omni-test/SKILL.md) |
+| CI, examples, docs, public behavior, or contributor evidence | [tests-docs-checklist.md](tests-docs-checklist.md) | None |
+| Suitable hardware/server and runnable affected path | [verification.md](verification.md) | None |
+| User asks who should review or asks to request/ping reviewers | [review-requests.md](review-requests.md) | None |
+
+For a bug fix, require a reachable reproduction, before/after behavior, and a
+regression test that would fail when the defect returns. For a refactor, prove
+behavior parity and remove obsolete paths. For a feature, verify the public
+contract, compatibility/default behavior, production dispatch, and docs.
 
 ## Bound context expansion
 
