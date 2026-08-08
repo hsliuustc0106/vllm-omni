@@ -60,6 +60,12 @@ unrelated cleanup from untouched files.
    alternatives were considered, and why the chosen interface is preferable.
    Record compatibility, deprecation or migration behavior, and the rationale
    in the PR and corresponding feature design document.
+8. Require every bug-fix PR to add an automated regression test that reproduces
+   the defect on the frozen base and passes on the fixed head. Exercise the
+   production path or nearest stable boundary and assert the corrected behavior,
+   not only process survival. Record the exact base/head command and result, and
+   place hardware- or model-specific coverage in the correct CI lane. A manual
+   reproduction supplements but does not replace the regression test.
 
 ## Blocking risk scan
 
