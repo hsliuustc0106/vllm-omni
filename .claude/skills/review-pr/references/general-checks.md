@@ -5,7 +5,8 @@ not a finding until the diff introduces or exposes a reachable trigger, impact,
 and smallest safe fix. Do not report unrelated backlog.
 
 Official docs: [contributing guide](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/)
-and [feature compatibility](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/feature_compatibility/).
+[feature compatibility](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/feature_compatibility/),
+and [design documents](https://docs.vllm.ai/projects/vllm-omni/en/latest/design/).
 
 ## Contract and scope
 
@@ -41,6 +42,12 @@ unrelated cleanup from untouched files.
    method, prefer reuse, consolidation, or extension of an existing abstraction;
    split the class when new behavior creates a separate responsibility or makes
    the class unnecessarily long.
+5. Require every new feature to add or update a feature design document under
+   `docs/design/` before merge. Cover the problem and scope, ownership and data
+   flow, public API/config/default and compatibility changes, failure and
+   lifecycle behavior, alternatives and tradeoffs, validation, limitations,
+   and rollout. Keep the depth proportional to the feature, but do not omit the
+   design artifact for a small implementation.
 
 ## Blocking risk scan
 
