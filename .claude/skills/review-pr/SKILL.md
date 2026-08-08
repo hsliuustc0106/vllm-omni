@@ -1,6 +1,6 @@
 ---
 name: review-pr
-description: Review pull requests and local branches for vllm-project/vllm-omni with a frozen diff, InferMatrixCopilot routing, owner-specific rules, targeted validation, and concise evidence-backed findings. Use for default, detailed, or repeat maintainer reviews; checking correctness, compatibility, tests, benchmarks, model additions, distributed changes, or breaking behavior; and identifying or explicitly requesting the most relevant code-owner reviewers. Use precheck-pr instead for an author's pre-submit self-check.
+description: Review pull requests and local branches for vllm-project/vllm-omni with a frozen snapshot, repo-local owner and domain routing, targeted validation, and concise evidence-backed findings. Use for default, detailed, or repeat maintainer reviews; checking correctness, compatibility, tests, benchmarks, model additions, distributed changes, or breaking behavior; and identifying or explicitly requesting the most relevant code-owner reviewers. Use precheck-pr instead for an author's pre-submit self-check.
 ---
 
 # Review vLLM-Omni Pull Requests
@@ -36,7 +36,6 @@ checkouts; use another skill for unrelated repositories.
 
 Default to maintainer brevity. A detailed or audit request expands coverage and
 lists `path:line` findings, but keeps the same confidence and severity bar.
-InferMatrix Direct remains the default; use Strict only when explicitly asked.
 
 ## Reference guide
 
@@ -79,7 +78,7 @@ If docs and live code disagree, verify the code/tests and report the drift.
 
 ### 1. Freeze and report the snapshot
 
-Pin the base and head before reading knowledge or source. Within 60 seconds,
+Pin the base and head before reading source or running validation. Within 60 seconds,
 report the pinned head, CI, mergeability, and preliminary findings in the host
 conversation. Do not wait for CI or post this update to GitHub.
 
@@ -92,29 +91,7 @@ committed, index, worktree, and NUL-safe in-scope untracked contents. Follow
 [review-execution.md](references/review-execution.md) for the required identity
 assertions and final byte-for-byte staleness check.
 
-### 2. Route once with InferMatrixCopilot
-
-After the progress update, call InferMatrixCopilot `review` once with the frozen
-target, title, body, changed files, `repo="vllm-project/vllm-omni"`, and
-`post=false`.
-
-- Use `mode="direct"` unless the user explicitly requests Strict.
-- In Direct mode, use returned `quick_map` routes only as supplemental
-  InferMatrix knowledge. Select the primary route from the traced live consumer
-  and [review-routing.md](references/review-routing.md); when they conflict with
-  `quick_map`, the live consumer and repo-local route win. Record the mismatch
-  and ignore the conflicting route. Open a returned full route only when a
-  concrete ambiguity blocks source review.
-- Do not open a fallback index when routing returns no match; continue with the
-  repo-local routing reference and record the knowledge gap.
-- Treat the returned execution budget as a hard ceiling. Use its one extension
-  only for a stated unresolved P1 or other high-risk contract.
-- In Strict mode, poll the returned run to terminal; do not also run Direct.
-
-If InferMatrixCopilot is unavailable, continue locally and state the missing
-maintainer-knowledge routing. Do not install or reconfigure tools during review.
-
-### 3. Build the diff census
+### 2. Build the diff census
 
 Group files into production code, tests, docs, configuration, build/CI, and
 generated artifacts. Map each changed production file and test group to the PR
@@ -123,6 +100,16 @@ when they define the contract or reproduction.
 
 Mark unrelated scope and unexplained generated artifacts. Do not infer behavior
 from the PR description without tracing the live code.
+
+### 3. Route from the live behavior
+
+Trace each claimed behavior through the changed producer to its live consumer,
+then use [review-routing.md](references/review-routing.md) to select one primary
+owner, a second owner only for a real cross-boundary call path, and the smallest
+applicable cross-cutting overlays. Treat titles and changed paths as hints; the
+live producer-consumer contract and repo-local routing map are authoritative.
+For docs-, tests-, or CI-only changes with no production behavior, use the
+general checks and applicable cross-cutting references.
 
 ### 4. Run the blocker scan
 
@@ -142,16 +129,13 @@ sibling implementations rather than assuming the changed hunk is the only path.
 
 ### 5. Apply the selected domain checks
 
-Use [review-routing.md](references/review-routing.md) to choose the smallest
-applicable reference set and any existing repo-local domain skill. Select the
-primary owner from the claimed behavior and live consumer; use changed paths to
-validate, not replace, that decision. Inspect both sides of any config,
-registry, serialization, connector, cache, or stage boundary.
+Apply the reference set selected in step 3 and any matching repo-local domain
+skill. Inspect both sides of any config, registry, serialization, connector,
+cache, or stage boundary.
 
 When a diff adds or expands a helper, class, fallback, compatibility branch, or
 public behavior, run a subtraction pass: remove out-of-scope behavior and check
-whether each new abstraction can be deleted, merged, moved, or inlined. Record
-`subtraction_signal="none"` for ordinary changes without those signals.
+whether each new abstraction can be deleted, merged, moved, or inlined.
 
 ### 6. Verify the changed path
 
@@ -172,9 +156,7 @@ no-issue conclusion. Do not search further only to increase confidence.
 ### 7. Consolidate and deliver
 
 Verify each finding against the current diff, deduplicate by root cause, and
-order by severity. Before finalizing Direct mode, call
-`validate_direct_review` with the actual subtraction signal and exactly one
-consolidated final result.
+order by severity.
 
 Re-read the remote head immediately before delivery. If it changed, mark the
 review stale and restart from the new snapshot.

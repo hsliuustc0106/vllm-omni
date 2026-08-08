@@ -5,9 +5,8 @@ behavior owner, add a second only when the live call chain crosses its boundary,
 then select any cross-cutting overlays. Title prefixes are hints, not routes.
 
 Treat the traced live consumer and producer-consumer boundary as authoritative,
-then apply this repo-local map. InferMatrix `quick_map` routes are supplemental;
-when they disagree, keep the live/repo-local route and record the knowledge
-mismatch rather than following the conflicting suggestion.
+then apply this repo-local map. Use titles and changed paths to validate the
+route, not to override the live behavior.
 
 Official docs: [design documents](https://docs.vllm.ai/projects/vllm-omni/en/latest/design/),
 [model contribution guides](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/model/),

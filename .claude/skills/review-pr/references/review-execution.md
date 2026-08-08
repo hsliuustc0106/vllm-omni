@@ -73,8 +73,8 @@ explicit base and head rather than guessing.
 
 ## Report status before analysis
 
-Within 60 seconds of starting, and before InferMatrix knowledge reads, source
-searches, or tests, send this host update:
+Within 60 seconds of starting, and before source searches or tests, send this
+host update:
 
 ```text
 Pinned head: <SHA>
@@ -151,17 +151,6 @@ chooses that event.
 
 Reviewer requests and owner `@mention` comments are separate external writes;
 follow [review-requests.md](review-requests.md) when the user asks for them.
-
-Before finalizing Direct mode, call `validate_direct_review` with
-`final_comment_count=1` and:
-
-- `subtraction_signal="none"` when no helper/class/fallback/compatibility/public
-  behavior was added or expanded; or
-- `subtraction_signal="triggered"` plus concrete subtraction items or a
-  minimality proof.
-
-A partial completion result must remain a partial review with the missing
-evidence named.
 
 ## Re-review safely
 
