@@ -42,18 +42,24 @@ unrelated cleanup from untouched files.
    method, prefer reuse, consolidation, or extension of an existing abstraction;
    split the class when new behavior creates a separate responsibility or makes
    the class unnecessarily long.
-5. Require every new feature to add or update a feature design document under
-   `docs/design/` before merge. Cover the problem and scope, ownership and data
-   flow, public API/config/default and compatibility changes, failure and
-   lifecycle behavior, alternatives and tradeoffs, validation, limitations,
-   and rollout. Keep the depth proportional to the feature, but do not omit the
-   design artifact for a small implementation.
+5. Require every new feature, and every material change to an existing feature,
+   to add or update its feature design document under `docs/design/` before
+   merge. Cover the problem and scope, ownership and data flow, public
+   API/config/default and compatibility changes, failure and lifecycle behavior,
+   alternatives and tradeoffs, validation, limitations, and rollout. Keep the
+   depth proportional to the change, but do not omit the design artifact for a
+   small implementation.
 6. Require every performance PR to provide reproducible base-versus-head A/B
    results under the same hardware, software, model, workload, precision,
    topology, warmup, repetitions, and measurement scope. Include exact commands,
    variability, and a correctness or quality guard; one-sided or non-comparable
    numbers are incomplete evidence. Follow
    [perf-verification.md](perf-verification.md) for the full protocol.
+7. Require every addition, removal, default change, or semantic change to a
+   user-facing inference API or CLI to explain why it is necessary, which
+   alternatives were considered, and why the chosen interface is preferable.
+   Record compatibility, deprecation or migration behavior, and the rationale
+   in the PR and corresponding feature design document.
 
 ## Blocking risk scan
 
