@@ -66,6 +66,12 @@ unrelated cleanup from untouched files.
    not only process survival. Record the exact base/head command and result, and
    place hardware- or model-specific coverage in the correct CI lane. A manual
    reproduction supplements but does not replace the regression test.
+9. Require every new or materially changed recipe to follow
+   [`recipes/TEMPLATE.md`](../../../../recipes/TEMPLATE.md) and the naming and
+   layout conventions in [`recipes/README.md`](../../../../recipes/README.md).
+   Complete every applicable summary, use-case, reference, hardware,
+   environment, exact-command, verification, and notes section with tested,
+   reproducible details; explain any intentional deviation in the PR.
 
 ## Blocking risk scan
 
