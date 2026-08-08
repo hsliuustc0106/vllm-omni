@@ -72,6 +72,12 @@ unrelated cleanup from untouched files.
    Complete every applicable summary, use-case, reference, hardware,
    environment, exact-command, verification, and notes section with tested,
    reproducible details; explain any intentional deviation in the PR.
+10. Require every new model to verify its supported modalities, platforms,
+    execution modes, and features with production-path evidence. Update
+    `docs/models/supported_models.md` and every applicable feature support or
+    compatibility table; do not claim support that the PR does not validate.
+    Follow [model-addition-checklist.md](model-addition-checklist.md) for the
+    model-specific documentation checks.
 
 ## Blocking risk scan
 

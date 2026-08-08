@@ -7,7 +7,9 @@ Official docs: [model contribution guides](https://docs.vllm.ai/projects/vllm-om
 [adding an omni model](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/model/adding_omni_model/),
 [adding a diffusion model](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/model/adding_diffusion_model/),
 [adding a TTS model](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/model/adding_tts_model/),
-and [supported models](https://docs.vllm.ai/projects/vllm-omni/en/latest/models/supported_models/).
+[supported models](https://docs.vllm.ai/projects/vllm-omni/en/latest/models/supported_models/),
+[diffusion features](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/diffusion_features/),
+and [feature compatibility](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/feature_compatibility/).
 
 ## Match claims to the diff
 
@@ -31,6 +33,24 @@ Verify optional dependencies fail with an actionable message, weight names and
 dtypes map correctly, and each advertised serving mode reaches the production
 dispatcher. Confirm outputs are non-empty and valid for their modality, shape,
 sample rate, or response schema.
+
+## Keep support documentation truthful
+
+- Build an evidence-backed inventory of the new model's exact architecture and
+  checkpoint identifiers, modalities and tasks, hardware backends, serving
+  modes, and supported acceleration, parallelism, cache, offload, and
+  quantization features. Treat untested support as unknown, not supported.
+- Update `docs/models/supported_models.md` with the architecture, model family,
+  example checkpoints, and only the backends validated by the PR.
+- For a diffusion model, add it to the applicable ImageGen, VideoGen, or
+  AudioGen table in `docs/user_guide/diffusion_features.md`. Fill every feature
+  column according to its legend and document partial support or constraints.
+- Update `docs/user_guide/feature_compatibility.md` when the model changes valid
+  feature combinations, configuration constraints, examples, or limitations,
+  and update any other branch-local support table affected by the claims.
+- Cross-check every documented support mark against the registry, configuration,
+  production-path tests, and PR evidence; do not copy a sibling model's support
+  claims without validation.
 
 ## Remove accidental surface
 
