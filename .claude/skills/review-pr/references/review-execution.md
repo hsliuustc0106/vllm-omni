@@ -34,20 +34,36 @@ gh api "repos/vllm-project/vllm-omni/pulls/<PR>" \
 Discard the snapshot if either SHA changed. Do not mix comments or validation
 from different heads.
 
+After the SHAs stabilize, fetch and materialize `head_sha` in an isolated,
+detached worktree. Run every source read, `rg` search, import, and test from that
+worktree, not the caller's checkout. Assert that its `HEAD` equals `head_sha`
+before the first source read, before each validation group, and before delivery.
+If an exact worktree cannot be created, use SHA-addressed reads such as
+`git show <head_sha>:<path>` and report filesystem-dependent validation as a gap.
+
 For a local branch/worktree, determine the target ref from the user, current PR,
 or configured upstream; never infer it from the branch name. Resolve the target
 once and include all task-owned worktree state:
 
 ```bash
-git status --short
+git status --porcelain=v2 -z
 git rev-parse HEAD
 git rev-parse <target-ref>
 git merge-base <target-base-sha> HEAD
 git diff --stat <comparison-commit>
 git diff --name-status <comparison-commit>
-git diff <comparison-commit>
-git ls-files --others --exclude-standard
+git diff --binary <comparison-commit>
+git diff --cached --binary <comparison-commit>
+git diff --binary
+git ls-files --others --exclude-standard -z
 ```
+
+Freeze the exact bytes of every in-scope untracked file from the NUL-delimited
+list, plus a NUL-safe path, file-type, mode, and content-hash manifest. Also
+fingerprint `HEAD`, the target and merge base, porcelain status, and both binary
+index and worktree patches. Recording only untracked names is insufficient.
+Keep these snapshots in the evidence packet and do not mutate the reviewed
+checkout during a read-only review.
 
 For local changes without PR metadata, mark the title/body as synthetic. Base
 them on the user request and commit messages without inventing validation claims.
@@ -119,8 +135,13 @@ Use [maintainer-style-study.md](maintainer-style-study.md) for comment tone.
 Keep rule IDs, grades, and audit matrices internal unless the user asks for the
 complete audit.
 
-Verify every inline `path:line` against the frozen diff and recheck the head
-before delivery. Prefer one root-cause comment to several symptom comments.
+Verify every inline `path:line` against the frozen diff before delivery. For a
+PR, re-read the remote head and reassert that the detached validation worktree
+still equals `head_sha`. For a local review, recompute and byte-compare the
+frozen `HEAD`, target, merge base, status, index patch, worktree patch, and
+untracked-content manifest. Any mismatch makes the review stale; discard the
+affected evidence and restart. Prefer one root-cause comment to several symptom
+comments.
 
 Local presentation is the default. Only explicit authorization permits GitHub
 posting. When authorized, publish one consolidated final review after

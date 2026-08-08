@@ -86,6 +86,12 @@ conversation. Do not wait for CI or post this update to GitHub.
 If the target changes while fetching, discard the evidence and retry once. If
 it changes again, report the churn and wait for a stable target.
 
+For a PR, materialize the pinned head in an isolated detached worktree and run
+all source inspection and validation there. For a local review, freeze the
+committed, index, worktree, and NUL-safe in-scope untracked contents. Follow
+[review-execution.md](references/review-execution.md) for the required identity
+assertions and final byte-for-byte staleness check.
+
 ### 2. Route once with InferMatrixCopilot
 
 After the progress update, call InferMatrixCopilot `review` once with the frozen
@@ -93,8 +99,12 @@ target, title, body, changed files, `repo="vllm-project/vllm-omni"`, and
 `post=false`.
 
 - Use `mode="direct"` unless the user explicitly requests Strict.
-- In Direct mode, use only returned `quick_map` routes. Open a full route only
-  when a concrete ambiguity blocks source review.
+- In Direct mode, use returned `quick_map` routes only as supplemental
+  InferMatrix knowledge. Select the primary route from the traced live consumer
+  and [review-routing.md](references/review-routing.md); when they conflict with
+  `quick_map`, the live consumer and repo-local route win. Record the mismatch
+  and ignore the conflicting route. Open a returned full route only when a
+  concrete ambiguity blocks source review.
 - Do not open a fallback index when routing returns no match; continue with the
   repo-local routing reference and record the knowledge gap.
 - Treat the returned execution budget as a hard ceiling. Use its one extension

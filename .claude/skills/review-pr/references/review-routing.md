@@ -4,6 +4,11 @@ Use after the diff census. Apply the general checks first, choose one primary
 behavior owner, add a second only when the live call chain crosses its boundary,
 then select any cross-cutting overlays. Title prefixes are hints, not routes.
 
+Treat the traced live consumer and producer-consumer boundary as authoritative,
+then apply this repo-local map. InferMatrix `quick_map` routes are supplemental;
+when they disagree, keep the live/repo-local route and record the knowledge
+mismatch rather than following the conflicting suggestion.
+
 Official docs: [design documents](https://docs.vllm.ai/projects/vllm-omni/en/latest/design/),
 [model contribution guides](https://docs.vllm.ai/projects/vllm-omni/en/latest/contributing/model/),
 and [feature compatibility](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/feature_compatibility/).
@@ -29,7 +34,7 @@ behavior exists.
 | Signal | Read | Optional repo-local skill |
 | --- | --- | --- |
 | New or expanded model, loader, processor, registry, or stage config | [model-addition-checklist.md](model-addition-checklist.md) | [`add-tts-model`](../../add-tts-model/SKILL.md) or [`add-diffusion-model`](../../add-diffusion-model/SKILL.md) |
-| Accelerator, kernel, attention backend, quantization, dtype, scales, or vendor path | [platform-checks.md](platform-checks.md) and, if runnable, [verification.md](verification.md) | [`quantization`](../../quantization/SKILL.md) or [`vllm-omni-npu-upgrade`](../../vllm-omni-npu-upgrade/SKILL.md) |
+| Accelerator, kernel, attention backend, quantization, dtype, scales, or vendor path | [platform-checks.md](platform-checks.md) and, if runnable, [verification.md](verification.md) | [`quantization`](../../quantization/SKILL.md) or [`$vllm-omni-npu-model-runner-upgrade`](../../vllm-omni-npu-upgrade/SKILL.md) |
 | Latency, throughput, memory, scaling, precision, or quality claim | [perf-verification.md](perf-verification.md) | [`diffusion-perf-opt`](../../diffusion-perf-opt/SKILL.md) for diffusion |
 | Tests changed, absent for risky behavior, or test-only | [test-quality-evaluation.md](test-quality-evaluation.md) | [`vllm-omni-test`](../../vllm-omni-test/SKILL.md) |
 | CI, examples, docs, public behavior, or contributor evidence | [tests-docs-checklist.md](tests-docs-checklist.md) | None |
