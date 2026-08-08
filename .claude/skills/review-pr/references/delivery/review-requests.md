@@ -4,11 +4,22 @@ Read only when the user asks to identify, suggest, request, add, or ping
 reviewers. Finding candidates is read-only; GitHub review requests and
 `@mention` comments are external writes.
 
-Owner sources: the reviewed head's
-[CODEOWNERS](https://github.com/vllm-project/vllm-omni/blob/main/.github/CODEOWNERS)
-and [governance expertise](https://docs.vllm.ai/projects/vllm-omni/en/latest/community/governance/).
-Use the reviewed head first because ownership changes over time; do not copy a
-static owner list into review output.
+Owner sources, in order:
+
+1. the reviewed head's
+   [CODEOWNERS](https://github.com/vllm-project/vllm-omni/blob/main/.github/CODEOWNERS)
+   for path ownership;
+2. the active module design page's `owners` and `required_reviewers` metadata
+   for contract ownership and mandatory design review; and
+3. documented
+   [governance expertise](https://docs.vllm.ai/projects/vllm-omni/en/latest/community/governance/)
+   for specialization and tie-breaking.
+
+Resolve all three from the reviewed head when available because ownership
+changes over time. Use published docs only to discover a page absent from an
+older checkout, never to override the frozen head, and do not copy a static
+owner list into review output. CODEOWNERS remains the path authority; module
+metadata identifies contract experts and required design reviewers.
 
 ## Rank candidates
 
@@ -16,17 +27,22 @@ static owner list into review output.
    submitted reviews, and existing comments.
 2. Resolve the **last matching CODEOWNERS rule** for each changed file. Do not
    union an earlier broad rule with a later specific rule.
-3. Group files by the selected primary owner and the contract needing review.
-   Weight production owners and live consumers above tests/docs/CI owners and
-   the repository-wide fallback.
-4. Use documented governance specialties only to choose among matching owners:
+3. Resolve the primary module and feature overlays through
+   [design-contracts.md](../process/design-contracts.md). Read the active module
+   page's status, `owners`, and `required_reviewers`; do not treat owners on an
+   archived, superseded, or unrelated page as current authority.
+4. Group files by the selected primary owner and the exact module or feature
+   contract needing review. Weight production owners and live consumers above
+   tests/docs/CI owners and the repository-wide fallback. Include an applicable
+   `required_reviewers` entry even when it is not the path owner, and label why.
+5. Use documented governance specialties only to choose among matching owners:
    for example serving versus configuration, diffusion model versus cache or
    parallelism, TTS versus generic model execution, or CI versus tests.
-5. Exclude the PR author, bots, users who already completed the needed review,
+6. Exclude the PR author, bots, users who already completed the needed review,
    and duplicate pending requests. Do not infer availability or invent
    expertise from a username.
-6. Select one reviewer for a single-owner change and at most three for a real
-   cross-domain change. If more are plausible, rank them but do not ping a
+7. Select one reviewer for a single-owner change and at most three for a real
+   cross-module change. If more are plausible, rank them but do not ping a
    broad group; ask the user before exceeding three.
 
 If every specific owner is excluded, consider one repository-wide fallback
@@ -43,7 +59,7 @@ ambiguous. Never use commit count alone to override an explicit current owner.
 Show the user the exact candidate set and rationale:
 
 ```text
-@owner — <owned paths or domain>; please verify <specific changed contract>.
+@owner — <owned paths or module role>; please verify <specific module or feature contract>.
 ```
 
 Draft one consolidated comment tied to the frozen head:
@@ -51,8 +67,8 @@ Draft one consolidated comment tied to the frozen head:
 ```text
 Requesting focused review for `<short-head-sha>`:
 
-- @owner1: could you check <contract> in `<path/group>`?
-- @owner2: could you check <cross-boundary contract> in `<path/group>`?
+- @owner1: could you check the <module contract> in `<path/group>`?
+- @owner2: could you check the <feature or cross-boundary contract> in `<path/group>`?
 
 Relevant validation: <one concise result or exact remaining gap>.
 ```

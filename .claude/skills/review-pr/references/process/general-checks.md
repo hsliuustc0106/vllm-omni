@@ -42,15 +42,18 @@ unrelated cleanup from untouched files.
    method, prefer reuse, consolidation, or extension of an existing abstraction;
    split the class when new behavior creates a separate responsibility or makes
    the class unnecessarily long.
-5. Require changes to user-facing behavior to update `docs/`. For a major
-   architectural change, apply the branch's contributing policy for a design RFC
-   or issue; the current policy uses more than 500 changed production-code lines,
-   excluding kernel, data, config, and test changes. Update an existing design
-   document when it defines the changed contract. Request a new document under
-   `docs/design/` only when repository policy or explicit maintainer acceptance
-   criteria require one, not as an automatic blocker for a small feature. When
-   required, cover scope, data flow, public contracts, failure behavior,
-   alternatives, validation, limitations, and rollout.
+5. Require changes to user-facing behavior to update `docs/`. Every new feature
+   must add a feature design page or extend the existing page that owns the same
+   cross-module workflow. Update the primary module design page whenever an
+   ownership boundary, invariant, dependency, or safe-change contract changes.
+   For a major architectural change, also apply the branch's contributing policy
+   for a design RFC or issue; the current policy uses more than 500 changed
+   production-code lines, excluding kernel, data, config, and test changes.
+   Resolve page status and authority through
+   [design-contracts.md](design-contracts.md). Do not demand a duplicate design
+   page when an existing page owns the exact contract. Cover scope, data flow,
+   public contracts, failure behavior, alternatives, validation, limitations,
+   and rollout.
 6. Require every performance PR to provide reproducible base-versus-head A/B
    results under the same hardware, software, model, workload, precision,
    topology, warmup, repetitions, and measurement scope. Include exact commands,
@@ -63,8 +66,8 @@ unrelated cleanup from untouched files.
    user-facing inference API or CLI to explain why it is necessary, which
    alternatives were considered, and why the chosen interface is preferable.
    Record compatibility, deprecation or migration behavior, and the rationale
-   in the PR. Update a corresponding design document when it exists or policy
-   requires one.
+   in the PR. Update the corresponding module and feature design documents when
+   they define the changed interface or workflow, or when policy requires one.
 8. Require every bug-fix PR to add an automated regression test that reproduces
    the defect on the frozen base and passes on the fixed head. Exercise the
    production path or nearest stable boundary and assert the corrected behavior,

@@ -1,6 +1,6 @@
 ---
 name: review-pr
-description: Review pull requests and local branches for vllm-project/vllm-omni with a frozen snapshot, repo-local owner and domain routing, targeted validation, and concise evidence-backed findings. Use for default, detailed, or repeat maintainer reviews; checking correctness, compatibility, tests, benchmarks, model additions, distributed changes, or breaking behavior; and identifying or explicitly requesting the most relevant code-owner reviewers. Use precheck-pr instead for an author's pre-submit self-check.
+description: Review pull requests and local branches for vllm-project/vllm-omni with a frozen snapshot, module-design ownership, feature-design overlays, targeted validation, and concise evidence-backed findings. Use for default, detailed, or repeat maintainer reviews; checking correctness, compatibility, tests, benchmarks, model additions, distributed changes, or breaking behavior; and identifying or explicitly requesting the most relevant code-owner reviewers. Use precheck-pr instead for an author's pre-submit self-check.
 ---
 
 # Review vLLM-Omni Pull Requests
@@ -39,8 +39,9 @@ lists `path:line` findings, but keeps the same confidence and severity bar.
 
 ## Reference guide
 
-Load references in review order. Every file is linked directly below; read only
-the selected primary domain and applicable conditional checks.
+Load references in review order: process, one primary module contract, matching
+feature designs, evidence checks, then delivery. Every file is linked directly
+below; do not load unrelated module references.
 
 Each concise reference links to the maintained
 [vLLM-Omni documentation](https://docs.vllm.ai/projects/vllm-omni/en/latest/).
@@ -54,25 +55,44 @@ If docs and live code disagree, verify the code/tests and report the drift.
 | --- | --- |
 | [review-execution.md](references/process/review-execution.md) | Every review; freeze inputs, inspect safely, and deliver against the same snapshot. |
 | [general-checks.md](references/process/general-checks.md) | Every review; apply repository-wide correctness and evidence rules. |
-| [review-routing.md](references/process/review-routing.md) | After the diff census; select one primary domain and conditional checks. |
+| [design-contracts.md](references/process/design-contracts.md) | Every production review; resolve branch-local module and feature design status. |
+| [review-routing.md](references/process/review-routing.md) | After the diff census; select one primary module and conditional overlays. |
 
-### Primary domain
+### Primary module contract
 
 | Reference | Read when |
 | --- | --- |
-| [configuration.md](references/domains/configuration.md) | Config construction, deploy YAML, schema, defaults, registry, or topology changes. |
-| [serving.md](references/domains/serving.md) | Entrypoints, request/response behavior, streaming, orchestration, or engine lifecycle changes. |
-| [model-executor.md](references/domains/model-executor.md) | Model loading, stage inputs, runners, workers, or device startup changes. |
-| [diffusion-checklist.md](references/domains/diffusion-checklist.md) | A diffusion pipeline, model, scheduler, cache, or feature changes. |
-| [distributed.md](references/domains/distributed.md) | Connectors, KV transfer, collectives, routing, or cross-stage communication changes. |
-| [scheduler.md](references/domains/scheduler.md) | Request state, token budgets, KV readiness, or prefix-cache behavior changes. |
+| [entrypoints.md](references/modules/entrypoints.md) | Offline/CLI/API ingress, validation, rendering, streaming, or sessions change. |
+| [configuration.md](references/modules/configuration.md) | Config construction, deploy/stage schema, defaults, registry, or topology changes. |
+| [input-output-modality.md](references/modules/input-output-modality.md) | Requests, messages, serialization, output types, accumulation, or completion change. |
+| [error-contracts.md](references/modules/error-contracts.md) | Error classification, fatality, propagation, sanitization, or rendering changes. |
+| [engine-orchestration.md](references/modules/engine-orchestration.md) | Cross-stage routing, request state, output ordering, RPC correlation, or terminal convergence changes. |
+| [stage-runtime.md](references/modules/stage-runtime.md) | Placement, startup, readiness, replica identity, affinity, membership, or shutdown changes. |
+| [omni-connector.md](references/modules/omni-connector.md) | Cross-stage/process/device/node transport or synchronization changes. |
+| [model-integration.md](references/modules/model-integration.md) | Registration, preprocessing, loading, runners, or model-specific execution changes. |
+| [ar-runtime.md](references/modules/ar-runtime.md) | AR scheduling, request/cache state, adapters, workers, or upstream vLLM semantics change. |
+| [diffusion.md](references/modules/diffusion.md) | Diffusion runtime, models, batching, parallelism, or offload changes. |
+| [execution-platforms.md](references/modules/execution-platforms.md) | Hardware selection, capabilities, vendor workers, kernels, or patches change. |
+| [cache-management.md](references/modules/cache-management.md) | Cache identity, reuse, validity, reset, eviction, or teardown changes. |
+| [quantization.md](references/modules/quantization.md) | Quantization selection, checkpoint metadata, layer mapping, precision, or constraints change. |
+| [observability.md](references/modules/observability.md) | Metrics, logs, units, labels, correlation, or lifecycle changes. |
+| [profiling.md](references/modules/profiling.md) | Profiling instrumentation, traces, start/stop lifecycle, or overhead changes. |
+| [benchmarking.md](references/modules/benchmarking.md) | Benchmark workload, metric calculation, CLI, or result metadata changes. |
 
-### Cross-cutting checks
+### Feature-design overlays
+
+| Reference | Read when |
+| --- | --- |
+| [runtime-stage-execution.md](references/features/runtime-stage-execution.md) | Disaggregated inference, async chunk/output/materialization, or prefix caching changes. |
+| [communication.md](references/features/communication.md) | A concrete OmniConnector backend or its deployment contract changes. |
+| [diffusion-acceleration.md](references/features/diffusion-acceleration.md) | Diffusion parallelism, attention, quantization, cache, batching, or offload changes. |
+| [infrastructure-performance.md](references/features/infrastructure-performance.md) | Metrics infrastructure or documented speech optimization stacks change. |
+
+### Evidence and quality checks
 
 | Reference | Read when |
 | --- | --- |
 | [model-addition-checklist.md](references/checks/model-addition-checklist.md) | A model, architecture, loader, processor, registry, or stage config is added. |
-| [platform-checks.md](references/checks/platform-checks.md) | Hardware, kernel, attention backend, quantization, or vendor code changes. |
 | [perf-verification.md](references/checks/perf-verification.md) | The PR makes a latency, throughput, memory, or quality claim. |
 | [test-quality-evaluation.md](references/checks/test-quality-evaluation.md) | Tests change, are absent for risky code, or may not exercise production behavior. |
 | [tests-docs-checklist.md](references/checks/tests-docs-checklist.md) | Coverage, CI markers, examples, user docs, or PR evidence need review. |
@@ -115,12 +135,13 @@ from the PR description without tracing the live code.
 ### 3. Route from the live behavior
 
 Trace each claimed behavior through the changed producer to its live consumer,
-then use [review-routing.md](references/process/review-routing.md) to select one primary
-owner, a second owner only for a real cross-boundary call path, and the smallest
-applicable cross-cutting overlays. Treat titles and changed paths as hints; the
-live producer-consumer contract and repo-local routing map are authoritative.
-For docs-, tests-, or CI-only changes with no production behavior, use the
-general checks and applicable cross-cutting references.
+then use [design-contracts.md](references/process/design-contracts.md) and
+[review-routing.md](references/process/review-routing.md) to select one primary
+module contract, a second only for a real documented cross-boundary call path,
+and every matching feature-design and evidence overlay. Treat titles and paths
+as hints; live behavior and the frozen head's current design metadata are
+authoritative. For docs-, tests-, or CI-only changes, route to the production
+contract they protect or use only the applicable evidence checks.
 
 ### 4. Run the blocker scan
 
@@ -138,11 +159,14 @@ Cover every applicable offline/online, streaming/non-streaming, sync/async,
 feature-on/off, topology, and compatibility path. Search bounded callers and
 sibling implementations rather than assuming the changed hunk is the only path.
 
-### 5. Apply the selected domain checks
+### 5. Apply module and feature contracts
 
-Apply the reference set selected in step 3 and any matching repo-local domain
-skill. Inspect both sides of any config, registry, serialization, connector,
-cache, or stage boundary.
+Apply the reference set selected in step 3 and any matching repo-local skill.
+Read the exact module and feature pages in the frozen head, including status,
+ownership boundary, dependencies, candidate invariants, safe-change guide, and
+promotion gate. Candidate or draft rules are questions, not blockers, unless
+current code, tests, or policy enforce them. Inspect both sides of any config,
+registry, serialization, connector, cache, or stage boundary.
 
 When a diff adds or expands a helper, class, fallback, compatibility branch, or
 public behavior, run a subtraction pass: remove out-of-scope behavior and check
@@ -186,8 +210,9 @@ commits as an implied part of review.
 
 Only when the user asks to identify or request reviewers, read
 [review-requests.md](references/delivery/review-requests.md). Rank path-matched
-CODEOWNERS with documented domain expertise and propose one to three focused
-reviewers with an explicit rationale.
+CODEOWNERS with the frozen module page's owners or required reviewers and
+documented governance expertise; propose one to three focused reviewers with an
+explicit contract rationale.
 
 Identifying or suggesting reviewers is read-only. Requesting reviewers or
 posting `@mention` comments changes external state and requires explicit user

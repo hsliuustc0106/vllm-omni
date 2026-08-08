@@ -117,6 +117,5 @@ contract. Prefer one typed producer-consumer schema to repeated string keys.
 - Require focused registry/config/loading tests, a representative E2E path, and
   user-facing model/usage documentation.
 
-Use [diffusion-checklist.md](../domains/diffusion-checklist.md) for diffusion
-models and
+Use [diffusion.md](../modules/diffusion.md) for diffusion models and
 [perf-verification.md](perf-verification.md) for quantitative claims.
