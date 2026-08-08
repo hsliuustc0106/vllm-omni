@@ -27,8 +27,8 @@ defines two routing axes:
 6. Use published latest docs only for discovery when the reviewed head lacks a
    page; never import a newer contract into an older branch silently.
 
-When behavior changes an existing module or feature contract, require the same
-PR to update that page. A new cross-module feature requires a feature design
-page; a new or materially changed ownership boundary requires the relevant
-module design page. Do not demand a second page when an existing design already
-owns the exact contract.
+When behavior changes an active module or feature contract, require the same PR
+to update that page. Require a new page only when repository policy, an accepted
+RFC/issue, or explicit maintainer acceptance criteria do so; otherwise treat it
+as a non-blocking design suggestion. Do not demand a second page when an existing
+design already owns the exact contract.

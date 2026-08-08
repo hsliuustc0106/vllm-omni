@@ -116,11 +116,15 @@ conversation. Do not wait for CI or post this update to GitHub.
 If the target changes while fetching, discard the evidence and retry once. If
 it changes again, report the churn and wait for a stable target.
 
-For a PR, materialize the pinned head in an isolated detached worktree and run
-all source inspection and validation there. For a local review, freeze the
-committed, index, worktree, and NUL-safe in-scope untracked contents. Follow
-[review-execution.md](references/process/review-execution.md) for the required identity
-assertions and final byte-for-byte staleness check.
+For a trusted PR head, materialize the pinned head in an isolated detached
+worktree. A worktree freezes identity but is not a security sandbox. Treat fork
+heads as untrusted unless the user and environment policy explicitly establish
+otherwise: execute them only in a disposable, secret-free sandbox with restricted
+filesystem, network, and resources; without one, use static SHA-addressed reads
+and CI evidence only. For a local review, freeze the committed, index, worktree,
+and NUL-safe in-scope untracked contents. Follow
+[review-execution.md](references/process/review-execution.md) for trust gates,
+state fingerprints, and byte-for-byte staleness checks.
 
 ### 2. Build the diff census
 
@@ -174,8 +178,13 @@ whether each new abstraction can be deleted, merged, moved, or inlined.
 
 ### 6. Verify the changed path
 
-Run an import/version preflight, then the narrowest relevant tests and low-cost
-static checks. Bind every result to the head SHA and environment fingerprint.
+Before each validation group, verify the frozen SHA plus the tracked, index,
+untracked, and ignored-file fingerprint, or recreate a pristine snapshot. On a
+trusted head or inside the required sandbox, run an import/version preflight,
+then the narrowest relevant tests and low-cost static checks. Bind every result
+to the head SHA, snapshot fingerprint, and environment fingerprint. Never run
+imports, tests, builds, hooks, or repo-configurable tooling from an untrusted
+head on the reviewer host.
 
 - Treat CI as status evidence; inspect only the first overlapping failure.
 - For docs-only changes, use diff hygiene, links/build checks, and bounded live
@@ -193,8 +202,9 @@ no-issue conclusion. Do not search further only to increase confidence.
 Verify each finding against the current diff, deduplicate by root cause, and
 order by severity.
 
-Re-read the remote head immediately before delivery. If it changed, mark the
-review stale and restart from the new snapshot.
+Re-read the remote head and reverify or recreate the pristine validation
+snapshot immediately before delivery. If either changed, mark the review stale
+and restart from the new snapshot.
 
 Return findings first. Use
 [maintainer-style-study.md](references/delivery/maintainer-style-study.md) to keep them

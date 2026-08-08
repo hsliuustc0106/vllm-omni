@@ -34,12 +34,31 @@ gh api "repos/vllm-project/vllm-omni/pulls/<PR>" \
 Discard the snapshot if either SHA changed. Do not mix comments or validation
 from different heads.
 
-After the SHAs stabilize, fetch and materialize `head_sha` in an isolated,
-detached worktree. Run every source read, `rg` search, import, and test from that
-worktree, not the caller's checkout. Assert that its `HEAD` equals `head_sha`
-before the first source read, before each validation group, and before delivery.
-If an exact worktree cannot be created, use SHA-addressed reads such as
-`git show <head_sha>:<path>` and report filesystem-dependent validation as a gap.
+After the SHAs stabilize, fetch and materialize a trusted `head_sha` in an
+isolated detached worktree. Run every source read, `rg` search, import, and test
+from that snapshot, not the caller's checkout. A detached worktree provides
+snapshot isolation, not a security boundary.
+
+Treat a fork head as untrusted unless the user and environment policy explicitly
+establish trust. Never run its imports, tests, builds, hooks, package setup, or
+repo-configurable linters/plugins on the reviewer host. Execute them only in a
+disposable sandbox or VM with no credentials or inherited secrets, no host agent
+or service sockets, minimal read-only host mounts, disabled or explicitly
+allowlisted network, resource/time limits, and destruction after the run. If
+that boundary is unavailable, limit the review to the remote diff, SHA-addressed
+reads such as `git show <head_sha>:<path>`, and existing CI evidence; report all
+executable validation as a gap.
+
+Before the first source read, record a pristine snapshot fingerprint outside
+the reviewed worktree. Include `HEAD`, the NUL-delimited index entries and blob
+IDs, and a NUL-safe manifest of every worktree entry except Git metadata,
+including tracked, untracked, and ignored paths with file type, mode, symlink
+target, and content hash. Before each validation group and delivery, recompute
+and byte-compare the fingerprint as well as asserting `HEAD == head_sha`. If a
+tool changes or creates any entry, discard affected evidence and recreate the
+snapshot before another group; do not rely on `HEAD` alone or clean an unknown
+worktree in place. If an exact snapshot cannot be created, use SHA-addressed
+reads and report filesystem-dependent validation as a gap.
 
 For a local branch/worktree, determine the target ref from the user, current PR,
 or configured upstream; never infer it from the branch name. Resolve the target
@@ -112,8 +131,11 @@ repo, head SHA, command, result, Python/platform, dependency or lock fingerprint
 ```
 
 After preflight, run targeted tests and low-cost static checks alongside source
-inspection when possible. Map source symbols to tests with bounded `rg` searches
-rather than assuming the test directory mirrors production paths.
+inspection when possible. Imports, tests, builds, and linters may create caches
+or rewrite files, so isolate each potentially mutating group in a disposable
+snapshot or recreate the pinned snapshot before continuing. Map source symbols
+to tests with bounded `rg` searches rather than assuming the test directory
+mirrors production paths.
 
 Classify failures as code, test, infrastructure, or flaky before reporting.
 Skipped hardware tests are gaps, not passes. For available hardware, verify the
@@ -137,12 +159,12 @@ Keep rule IDs, grades, and audit matrices internal unless the user asks for the
 complete audit.
 
 Verify every inline `path:line` against the frozen diff before delivery. For a
-PR, re-read the remote head and reassert that the detached validation worktree
-still equals `head_sha`. For a local review, recompute and byte-compare the
-frozen `HEAD`, target, merge base, status, index patch, worktree patch, and
-untracked-content manifest. Any mismatch makes the review stale; discard the
-affected evidence and restart. Prefer one root-cause comment to several symptom
-comments.
+PR, re-read the remote head and byte-compare the detached snapshot fingerprint,
+or recreate it from `head_sha`, before asserting current lines. For a local
+review, recompute and byte-compare the frozen `HEAD`, target, merge base, status,
+index patch, worktree patch, and untracked-content manifest. Any mismatch makes
+the review stale; discard the affected evidence and restart. Prefer one
+root-cause comment to several symptom comments.
 
 Local presentation is the default. Only explicit authorization permits GitHub
 posting. When authorized, publish one consolidated final review after
