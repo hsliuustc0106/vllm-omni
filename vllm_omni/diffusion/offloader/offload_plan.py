@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Declarative OffloadPlan for distributed layerwise offload.
+"""Declarative OffloadPlan for layerwise and distributed layerwise offload.
 
 Models declare this as a class attribute ``_offload_plan`` on the
 pipeline class. When present, the offloader uses it instead of
@@ -16,7 +16,7 @@ from torch import nn
 
 @dataclass(frozen=True)
 class OffloadPlan:
-    """Optional declarative metadata for distributed layerwise offload.
+    """Optional declarative metadata for layerwise and distributed layerwise offload.
 
     Models declare this as a class attribute ``_offload_plan`` on the
     pipeline class.  When present, the offloader uses it instead of
@@ -28,6 +28,8 @@ class OffloadPlan:
     2. Heuristic search for ``layers`` / ``blocks`` / ``h`` attributes.
 
     Attributes:
+        on_demand_component_paths: Component paths whose model lifecycle moves
+            them to the device only around encode/decode phases.
         block_attrs: Maps DiT path → tuple of block-list attribute names.
             e.g. ``{"transformer": ("gen_layers",),
                     "transformer.language_model": ("layers",)}``

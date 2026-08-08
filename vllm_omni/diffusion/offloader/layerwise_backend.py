@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from itertools import chain
+from operator import attrgetter
 from typing import Any
 
 import torch
@@ -13,8 +14,15 @@ from vllm.logger import init_logger
 from vllm_omni.diffusion.hooks import HookRegistry, ModelHook
 from vllm_omni.platforms import current_omni_platform
 
-from .base import OffloadBackend, OffloadConfig
+from .base import (
+    DIT_COMPONENT,
+    TEXT_ENCODER_COMPONENT,
+    VAE_COMPONENT,
+    OffloadBackend,
+    OffloadConfig,
+)
 from .module_collector import ModuleDiscovery
+from .offload_plan import OffloadPlan, get_offload_plan
 
 logger = init_logger(__name__)
 
@@ -302,6 +310,77 @@ def remove_block_hook(module: nn.Module) -> None:
         logger.debug("Removed offload hook from %s", module.__class__.__name__)
 
 
+def enable_plan_encoder_layerwise_offload(
+    module: nn.Module,
+    name: str,
+    plan: OffloadPlan | None,
+    *,
+    device: torch.device,
+    stream: current_omni_platform.Stream,
+    pin_memory: bool,
+) -> bool:
+    """Apply rank-local layerwise hooks to plan-declared encoder stacks."""
+    if plan is None or name not in plan.encoder_block_attrs:
+        return False
+    if not callable(getattr(module, "load_to_device", None)) or not callable(getattr(module, "offload_to_cpu", None)):
+        raise ValueError(
+            f"Encoder {name!r} declares blockwise offload paths but must "
+            "implement load_to_device() and offload_to_cpu()"
+        )
+    if getattr(module, "_omni_layerwise_enabled", False):
+        return True
+
+    hooks: list[LayerwiseOffloadHook] = []
+    block_groups: list[nn.ModuleList] = []
+    for block_path in plan.encoder_block_attrs[name]:
+        try:
+            blocks = attrgetter(block_path)(module)
+        except AttributeError:
+            logger.warning("Encoder offload path %s.%s was not found", name, block_path)
+            continue
+        if not isinstance(blocks, nn.ModuleList) or len(blocks) <= 1:
+            logger.warning(
+                "Encoder offload path %s.%s is not a streamable block list",
+                name,
+                block_path,
+            )
+            continue
+        group_hooks = [apply_block_hook(blocks[-1], blocks[0], device, stream, pin_memory)]
+        group_hooks.extend(
+            apply_block_hook(block, blocks[index + 1], device, stream, pin_memory)
+            for index, block in enumerate(blocks[:-1])
+        )
+        for index, hook in enumerate(group_hooks):
+            hook._prev_hook = group_hooks[index - 1]
+        hooks.extend(group_hooks)
+        block_groups.append(blocks)
+
+    if not hooks:
+        return False
+    module._omni_layerwise_hooks = hooks
+    module._omni_layerwise_block_groups = block_groups
+    module._omni_layerwise_enabled = True
+    logger.info(
+        "Enabled rank-local layerwise offload for encoder %s (%d blocks across %d stacks)",
+        name,
+        sum(len(blocks) for blocks in block_groups),
+        len(block_groups),
+    )
+    return True
+
+
+def disable_plan_encoder_layerwise_offload(module: nn.Module) -> None:
+    """Remove hooks installed by :func:`enable_plan_encoder_layerwise_offload`."""
+    if not getattr(module, "_omni_layerwise_enabled", False):
+        return
+    for blocks in getattr(module, "_omni_layerwise_block_groups", []):
+        for block in blocks:
+            remove_block_hook(block)
+    module._omni_layerwise_hooks = []
+    module._omni_layerwise_block_groups = []
+    module._omni_layerwise_enabled = False
+
+
 class LayerWiseOffloadBackend(OffloadBackend):
     """Layer-wise (block-level) offloading backend.
 
@@ -315,6 +394,34 @@ class LayerWiseOffloadBackend(OffloadBackend):
 
         self.copy_stream = current_omni_platform.Stream()
         self._blocks: list[list[nn.Module]] = []
+        self._encoder_modules: list[nn.Module] = []
+        self._staged_components: list[nn.Module] = []
+
+    def _prepare_component(
+        self,
+        module: nn.Module,
+        name: str,
+        *,
+        selected: bool,
+        blockwise: bool,
+        stage_on_demand: bool,
+    ) -> None:
+        load_to_device = getattr(module, "load_to_device", None)
+        offload_to_cpu = getattr(module, "offload_to_cpu", None)
+        if blockwise and not (callable(load_to_device) and callable(offload_to_cpu)):
+            raise ValueError(
+                f"Encoder {name!r} declares blockwise offload paths but must "
+                "implement load_to_device() and offload_to_cpu()"
+            )
+        if selected and stage_on_demand and callable(offload_to_cpu):
+            offload_to_cpu()
+            self._staged_components.append(module)
+            logger.info("Prepared %s for pipeline-managed staged offload", name)
+            return
+        if blockwise:
+            load_to_device()
+            return
+        module.to(self.device)
 
     def enable(self, pipeline: nn.Module) -> None:
         if self.enabled:
@@ -322,20 +429,42 @@ class LayerWiseOffloadBackend(OffloadBackend):
             return
 
         modules = ModuleDiscovery.discover(pipeline)
-        if not modules.dits:
+        plan = get_offload_plan(pipeline)
+        if not modules.dits and self.config.offloads(DIT_COMPONENT):
             logger.warning("No DiT/transformer modules found, skipping layer-wise offloading")
-            return
 
-        # Move encoders to GPU (they stay resident)
-        for enc in modules.encoders:
-            enc.to(self.device)
+        for enc, enc_name in zip(modules.encoders, modules.encoder_names):
+            selected = self.config.offloads(TEXT_ENCODER_COMPONENT)
+            blockwise = selected and enable_plan_encoder_layerwise_offload(
+                enc,
+                enc_name,
+                plan,
+                device=self.device,
+                stream=self.copy_stream,
+                pin_memory=self.config.pin_cpu_memory,
+            )
+            if blockwise:
+                self._encoder_modules.append(enc)
+            self._prepare_component(
+                enc,
+                enc_name,
+                selected=selected,
+                blockwise=blockwise,
+                stage_on_demand=bool(selected and plan is not None and enc_name in plan.on_demand_component_paths),
+            )
 
-        # Move VAE(s) to GPU if available
-        for vae in modules.vaes:
+        for vae, vae_name in zip(modules.vaes, modules.vae_names):
+            selected = self.config.offloads(VAE_COMPONENT)
             try:
-                vae.to(self.device, non_blocking=True)
+                self._prepare_component(
+                    vae,
+                    vae_name,
+                    selected=selected,
+                    blockwise=False,
+                    stage_on_demand=bool(selected and plan is not None and vae_name in plan.on_demand_component_paths),
+                )
             except Exception as exc:
-                logger.debug("Failed to move VAE to GPU: %s", exc)
+                logger.debug("Failed to prepare VAE %s: %s", vae_name, exc)
 
         # Move resident modules to GPU (small modules needed every forward)
         for name, module in zip(modules.resident_names, modules.resident_modules):
@@ -343,6 +472,12 @@ class LayerWiseOffloadBackend(OffloadBackend):
                 module.to(self.device)
             except Exception as exc:
                 logger.debug("Failed to move resident module %s to GPU: %s", name, exc)
+
+        if not self.config.offloads(DIT_COMPONENT):
+            for dit_module in modules.dits:
+                dit_module.to(self.device)
+            self.enabled = bool(self._encoder_modules or self._staged_components)
+            return
 
         logger.info("Applying layer-wise offloading on %s", modules.dit_names)
 
@@ -427,8 +562,7 @@ class LayerWiseOffloadBackend(OffloadBackend):
             # Track hooked blocks for cleanup
             self._blocks.append(blocks)
 
-        if len(self._blocks) > 0 and len(self._blocks[0]) > 0:
-            self.enabled = True
+        self.enabled = bool(self._blocks or self._encoder_modules or self._staged_components)
 
     def disable(self) -> None:
         if not self.enabled:
@@ -438,7 +572,11 @@ class LayerWiseOffloadBackend(OffloadBackend):
             for block in blocks:
                 remove_block_hook(block)
 
+        for module in self._encoder_modules:
+            disable_plan_encoder_layerwise_offload(module)
         self._blocks.clear()
+        self._encoder_modules.clear()
+        self._staged_components.clear()
         self.enabled = False
         logger.info("Layer-wise offloading disabled")
 

@@ -381,6 +381,7 @@ class StageDeployConfig:
     enable_layerwise_offload: bool | None = None
 
     enable_distributed_layerwise_offload: bool | None = None
+    layerwise_offload_components: str | list[str] | None = None
     dlo_use_allgather: bool | None = None
     dlo_resident_layers: int | None = None
     # Diffusion-specific debug and observability knobs.

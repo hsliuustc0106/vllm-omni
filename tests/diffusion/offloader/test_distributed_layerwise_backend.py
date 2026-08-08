@@ -1382,3 +1382,103 @@ class TestDynamicSlotTracking:
         # pre_forward should override to slot 1
         hook_b.pre_forward(block_b)
         assert hook_b.current_slot == 1, "pre_forward should read _prev_hook._prefetched_slot=1, not keep initial 0"
+
+
+class _ComponentEncoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.vision = nn.Module()
+        self.vision.blocks = nn.ModuleList([_DummyBlock(), _DummyBlock()])
+        self.text_model = nn.Module()
+        self.text_model.layers = nn.ModuleList([_DummyBlock(), _DummyBlock()])
+        self.offload_calls = 0
+        self.to_calls = 0
+
+    def load_to_device(self):
+        return None
+
+    def offload_to_cpu(self):
+        self.offload_calls += 1
+        for hook in getattr(self, "_omni_layerwise_hooks", []):
+            hook.offload_layer()
+
+    def to(self, *args, **kwargs):
+        self.to_calls += 1
+        return super().to(*args, **kwargs)
+
+
+class _ComponentVAE(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(2, 2)
+        self.offload_calls = 0
+        self.to_calls = 0
+
+    def offload_to_cpu(self):
+        self.offload_calls += 1
+        return self.to("cpu")
+
+    def to(self, *args, **kwargs):
+        self.to_calls += 1
+        return super().to(*args, **kwargs)
+
+
+class _DistributedComponentPipeline(nn.Module):
+    _offload_plan = OffloadPlan(
+        encoder_block_attrs={"text_encoder": ("vision.blocks", "text_model.layers")},
+        on_demand_component_paths=frozenset({"text_encoder", "vae"}),
+    )
+
+    def __init__(self):
+        super().__init__()
+        self.transformer = _SingleBlockModel(num_blocks=2)
+        self.text_encoder = _ComponentEncoder()
+        self.vae = _ComponentVAE()
+
+
+class TestDistributedComponentSelection:
+    def test_default_streams_encoder_and_stages_vae(self, patched_offload_runtime):
+        pipeline = _DistributedComponentPipeline()
+        backend = DistributedLayerwiseOffloadBackend(
+            OffloadConfig(
+                strategy=OffloadStrategy.DISTRIBUTED_LAYER_WISE,
+                pin_cpu_memory=False,
+                dlo_use_allgather=False,
+            ),
+            torch.device("cpu"),
+        )
+
+        backend.enable(pipeline)
+
+        assert pipeline.text_encoder._omni_layerwise_enabled
+        assert len(pipeline.text_encoder._omni_layerwise_hooks) == 4
+        assert pipeline.text_encoder.offload_calls == 1
+        assert pipeline.vae.offload_calls == 1
+        assert pipeline.text_encoder in backend._encoder_modules
+
+        backend.disable()
+
+        assert not pipeline.text_encoder._omni_layerwise_enabled
+        assert backend._encoder_modules == []
+
+    def test_dit_only_keeps_encoder_and_vae_resident(self, patched_offload_runtime):
+        pipeline = _DistributedComponentPipeline()
+        backend = DistributedLayerwiseOffloadBackend(
+            OffloadConfig(
+                strategy=OffloadStrategy.DISTRIBUTED_LAYER_WISE,
+                pin_cpu_memory=False,
+                dlo_use_allgather=False,
+                components=frozenset({"dit"}),
+            ),
+            torch.device("cpu"),
+        )
+
+        backend.enable(pipeline)
+
+        assert not hasattr(pipeline.text_encoder, "_omni_layerwise_enabled")
+        assert pipeline.text_encoder.offload_calls == 0
+        assert pipeline.text_encoder.to_calls == 1
+        assert pipeline.vae.offload_calls == 0
+        assert pipeline.vae.to_calls == 1
+
+        backend.disable()

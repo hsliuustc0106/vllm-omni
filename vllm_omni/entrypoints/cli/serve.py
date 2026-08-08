@@ -704,6 +704,14 @@ class OmniServeCommand(CLISubcommand):
             "DP size is automatically derived from the parallel configuration.",
         )
         omni_config_group.add_argument(
+            "--layerwise-offload-components",
+            type=str,
+            default=None,
+            help="Comma-separated components controlled by layerwise offload: "
+            "dit,text_encoder,vae. Defaults to all supported components. "
+            "Distributed layerwise offload requires dit.",
+        )
+        omni_config_group.add_argument(
             "--dlo-use-allgather",
             dest="dlo_use_allgather",
             action="store_true",

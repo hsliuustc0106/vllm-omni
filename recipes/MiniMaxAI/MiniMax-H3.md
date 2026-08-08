@@ -91,11 +91,12 @@ same time on a host sized for this minimum.
 The consumer-GPU profiles below are HBM budgets only. They still require the
 host-RAM budget above.
 
-### Single GPU: accuracy and memory first
+### Single GPU: blockwise capacity path
 
-The single-GPU configuration uses model-level CPU offload.
-This matches the accuracy-qualified reference path and prevents the Qwen3-VL
-encoder and DiT from being resident on the GPU at the same time.
+Use ordinary layerwise offload when one GPU cannot keep the Qwen3-VL encoder
+and DiT resident together. The component list below streams the active DiT,
+the Qwen vision blocks, and the first 50 Qwen text layers. Encoder blocks stay
+rank-local; the video/audio VAEs are staged only around encode/decode.
 
 ```bash
 export MODEL=MiniMaxAI/MiniMax-H3
@@ -103,20 +104,37 @@ export PORT=8091
 
 CUDA_VISIBLE_DEVICES=0 \
 VLLM_WORKER_MULTIPROC_METHOD=spawn \
-VLLM_OMNI_VIDEO_SYNC_TIMEOUT=1800 \
+VLLM_OMNI_VIDEO_SYNC_TIMEOUT=14400 \
 vllm serve "${MODEL}" \
   --omni \
   --host 0.0.0.0 \
   --port "${PORT}" \
   --trust-remote-code \
+  --task-type fl2va \
   --num-gpus 1 \
-  --enable-cpu-offload \
+  --enable-layerwise-offload \
+  --layerwise-offload-components dit,text_encoder,vae \
+  --enforce-eager \
   --diffusion-attention-backend FLASH_ATTN
 ```
 
-Use a GPU with enough memory for the active H3 component and enough system RAM
-for both offloaded DiTs plus the shared components. Model-level offload keeps
-the two DiTs mutually exclusive on GPU, but adds PCIe/NVLink transfer latency.
+This is a capacity profile, not a latency profile: every denoising step streams
+DiT blocks over the host link, while encoder blocks are streamed only during
+the short conditioning phase. It requires host memory for the complete
+checkpoint plus pinned transfer buffers. Re-measure peak HBM on the target
+shape; this command does not claim a particular GPU model as validated.
+
+A one-B300 correctness smoke selected only `text_encoder` (keeping the DiT and
+VAEs resident) and completed a 384x672, 5-second T2VA request with two denoise
+steps. It installed 77 encoder hooks across the vision and text stacks, used a
+77,728 MiB worker peak, and measured 2.803 seconds encode, 2.706 seconds
+denoise, and 4.503 seconds decode. These reduced-step numbers validate the
+execution path; they are not a quality or production-latency benchmark.
+
+To keep the older whole-component behavior, replace the two layerwise flags
+with `--enable-cpu-offload`. Model-level offload swaps the complete encoder and
+DiT and therefore has a higher encode-phase peak than encoder blockwise
+offload.
 
 ### Two 24/32 GB GPUs: TP2 distributed layerwise offload
 
@@ -149,6 +167,7 @@ vllm serve "${MODEL}" \
   --vae-parallel-mode tile \
   --vae-use-tiling \
   --enable-distributed-layerwise-offload \
+  --layerwise-offload-components dit,text_encoder,vae \
   --dlo-no-use-allgather \
   --dlo-resident-layers 20 \
   --enforce-eager \

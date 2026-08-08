@@ -542,6 +542,7 @@ class OrchestratorArgs:
     enable_cpu_offload: bool = False
     enable_layerwise_offload: bool = False
     enable_distributed_layerwise_offload: bool = False
+    layerwise_offload_components: str | list[str] | None = None
     dlo_use_allgather: bool = True
     dlo_resident_layers: int = 0
     boundary_ratio: float | None = None

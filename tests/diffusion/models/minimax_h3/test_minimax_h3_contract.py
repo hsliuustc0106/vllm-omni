@@ -436,6 +436,12 @@ def test_dlo_offload_plan_includes_token_refiner():
 
     assert MiniMaxH3Pipeline._offload_plan.offload_submodules == {"token_refiner": "blocks"}
     assert MiniMaxH3Pipeline._offload_plan.resident_dit_paths == frozenset({"transformer"})
+    assert MiniMaxH3Pipeline._offload_plan.encoder_block_attrs == {
+        "text_encoder": ("vision.blocks", "text_model.layers")
+    }
+    assert MiniMaxH3Pipeline._offload_plan.on_demand_component_paths == frozenset(
+        {"text_encoder", "video_vae", "audio_vae"}
+    )
 
 
 def test_joint_postprocess_is_multiprocessing_picklable():
@@ -1074,6 +1080,28 @@ def test_layerwise_offload_releases_text_encoder(offload_flag):
     pipeline.text_encoder.offload_to_cpu.assert_called_once_with()
 
 
+def test_layerwise_dit_only_keeps_text_encoder_resident():
+    from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
+
+    pipeline = object.__new__(MiniMaxH3Pipeline)
+    torch.nn.Module.__init__(pipeline)
+    pipeline.od_config = SimpleNamespace(
+        enable_cpu_offload=False,
+        enable_layerwise_offload=True,
+        enable_distributed_layerwise_offload=False,
+        layerwise_offload_components="dit",
+    )
+    pipeline.text_encoder = Mock()
+    expected = torch.ones(2, 3)
+    pipeline.text_encoder.encode_ids.return_value = expected
+
+    actual = pipeline._encode_text_hidden(torch.tensor([1, 2]), {})
+
+    assert actual is expected
+    pipeline.text_encoder.load_to_device.assert_called_once_with()
+    pipeline.text_encoder.offload_to_cpu.assert_not_called()
+
+
 def test_distributed_layerwise_offload_releases_text_encoder():
     from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
 
@@ -1111,6 +1139,25 @@ def test_distributed_layerwise_offload_stages_vae_component():
         component.offload_to_cpu.assert_not_called()
 
     component.offload_to_cpu.assert_called_once_with()
+
+
+def test_dit_encoder_selection_keeps_vae_resident():
+    from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
+
+    pipeline = object.__new__(MiniMaxH3Pipeline)
+    torch.nn.Module.__init__(pipeline)
+    pipeline.od_config = SimpleNamespace(
+        enable_layerwise_offload=True,
+        enable_distributed_layerwise_offload=False,
+        layerwise_offload_components="dit,text_encoder",
+    )
+    component = Mock()
+
+    with pipeline._component_on_device(component):
+        pass
+
+    component.load_to_device.assert_not_called()
+    component.offload_to_cpu.assert_not_called()
 
 
 def test_distributed_layerwise_resident_blocks_are_stage_scoped():

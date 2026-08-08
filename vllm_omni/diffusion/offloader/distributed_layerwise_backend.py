@@ -28,8 +28,17 @@ from vllm.logger import init_logger
 from vllm_omni.diffusion.hooks import HookRegistry, ModelHook
 from vllm_omni.platforms import current_omni_platform
 
-from .base import OffloadBackend, OffloadConfig
+from .base import (
+    TEXT_ENCODER_COMPONENT,
+    VAE_COMPONENT,
+    OffloadBackend,
+    OffloadConfig,
+)
 from .block_discovery import get_blocks_from_dit
+from .layerwise_backend import (
+    disable_plan_encoder_layerwise_offload,
+    enable_plan_encoder_layerwise_offload,
+)
 from .module_collector import ModuleDiscovery
 from .offload_plan import OffloadPlan, get_offload_plan, supports_mmap_loading
 from .tensor_utils import (
@@ -679,6 +688,7 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         self._all_hook_groups: list[list[DistributedLayerwiseOffloadHook]] = []
         self._resident_blocks: list[nn.Module] = []
         self._resident_layer_group: PinnedResidentLayerGroup | None = None
+        self._encoder_modules: list[nn.Module] = []
 
     def load_resident_layers(self) -> None:
         """Load the model-declared leading blocks for the denoise stage."""
@@ -1190,55 +1200,24 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         module.to(self.device)
         logger.info("Moved %s (%s) to GPU (resident)", label, module.__class__.__name__)
 
-    def _try_layerwise_offload_encoder(self, module: nn.Module, name: str, plan: OffloadPlan | None) -> bool:
+    def _try_layerwise_offload_encoder(
+        self,
+        module: nn.Module,
+        name: str,
+        plan: OffloadPlan | None,
+    ) -> bool:
         """Stream plan-declared encoder blocks on each rank without AllGather."""
-        if plan is None or name not in plan.encoder_block_attrs:
-            return False
-        if getattr(module, "_omni_layerwise_enabled", False):
-            return True
-
-        from operator import attrgetter
-
-        from vllm_omni.diffusion.offloader.layerwise_backend import apply_block_hook
-
-        hooks = []
-        block_groups = []
-        copy_stream = current_omni_platform.Stream()
-        for block_path in plan.encoder_block_attrs[name]:
-            try:
-                blocks = attrgetter(block_path)(module)
-            except AttributeError:
-                logger.warning("Encoder offload path %s.%s was not found", name, block_path)
-                continue
-            if not isinstance(blocks, nn.ModuleList) or len(blocks) <= 1:
-                logger.warning("Encoder offload path %s.%s is not a streamable block list", name, block_path)
-                continue
-            group_hooks = [
-                apply_block_hook(blocks[-1], blocks[0], self.device, copy_stream, self.config.pin_cpu_memory)
-            ]
-            group_hooks.extend(
-                apply_block_hook(block, blocks[index + 1], self.device, copy_stream, self.config.pin_cpu_memory)
-                for index, block in enumerate(blocks[:-1])
-            )
-            for index, hook in enumerate(group_hooks):
-                hook._prev_hook = group_hooks[index - 1]
-            hooks.extend(group_hooks)
-            block_groups.append(blocks)
-
-        if not hooks:
-            return False
-        # The component lifecycle uses these generic attributes to keep only
-        # non-block encoder state resident during the encode phase.
-        module._omni_layerwise_hooks = hooks
-        module._omni_layerwise_block_groups = block_groups
-        module._omni_layerwise_enabled = True
-        logger.info(
-            "Enabled rank-local layerwise offload for encoder %s (%d blocks across %d stacks)",
+        enabled = enable_plan_encoder_layerwise_offload(
+            module,
             name,
-            sum(len(blocks) for blocks in block_groups),
-            len(block_groups),
+            plan,
+            device=self.device,
+            stream=self.copy_stream,
+            pin_memory=self.config.pin_cpu_memory,
         )
-        return True
+        if enabled and module not in self._encoder_modules:
+            self._encoder_modules.append(module)
+        return enabled
 
     def _try_layerwise_offload_submodule(self, module: nn.Module, name: str, plan: OffloadPlan | None = None) -> bool:
         """Try to apply layerwise offload to a large submodule's blocks.
@@ -1479,20 +1458,24 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
             else:
                 logger.info("Weights loaded via regular loader — skipping mmap (model does not support mmap)")
 
-        # Keep VAE/encoders on CPU; move to GPU on-demand via hooks.
-        # This saves ~4.3 GB HBM per card (VAE 1.3 + encoder 1.1 + sound 1.9)
-        # during the DiT forward pass.  They are only needed briefly for
-        # text-encoding (before DiT) and VAE-decode (after DiT).
+        # Stage selected encoders/VAEs on demand; unselected components remain
+        # resident. Planned encoder block stacks use rank-local hooks so their
+        # TP layout never enters the DiT AllGather group.
         for enc, enc_name in zip(modules.encoders, modules.encoder_names):
-            self._try_layerwise_offload_encoder(enc, enc_name, plan)
+            selected = self.config.offloads(TEXT_ENCODER_COMPONENT)
+            if selected:
+                self._try_layerwise_offload_encoder(enc, enc_name, plan)
             self._register_on_demand_hook(
-                enc, "encoder", stage_on_demand=plan is not None and enc_name in plan.on_demand_component_paths
+                enc,
+                enc_name,
+                stage_on_demand=bool(selected and plan is not None and enc_name in plan.on_demand_component_paths),
             )
         for vae, vae_name in zip(modules.vaes, modules.vae_names):
+            selected = self.config.offloads(VAE_COMPONENT)
             self._register_on_demand_hook(
                 vae,
-                "vae",
-                stage_on_demand=(plan is not None and vae_name in plan.on_demand_component_paths),
+                vae_name,
+                stage_on_demand=bool(selected and plan is not None and vae_name in plan.on_demand_component_paths),
             )
 
         # Move resident modules to GPU (small modules needed every forward)
@@ -1729,6 +1712,10 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         for blocks in self._blocks:
             for block in blocks:
                 remove_distributed_block_hook(block)
+
+        for module in self._encoder_modules:
+            disable_plan_encoder_layerwise_offload(module)
+        self._encoder_modules.clear()
 
         for h in getattr(self, "_on_demand_handles", []):
             h.remove()

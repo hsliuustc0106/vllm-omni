@@ -88,6 +88,21 @@ This path is intentionally not implemented by reusing the AllGather mmap
 loader. It relies on the standard loader so model-specific TP/HSDP transforms
 remain intact.
 
+## Component placement
+
+`--layerwise-offload-components` accepts `dit`, `text_encoder`, and `vae`.
+Omitting it selects all supported components. DLO requires `dit`, because its
+request synchronization, double buffers, and optional AllGather schedule are
+owned by the DiT block sequence. Encoder-only or VAE-only placement uses the
+ordinary layerwise backend instead.
+
+DiT blocks use `DistributedLayerwiseOffloadHook`. Encoders declared through
+`OffloadPlan.encoder_block_attrs` deliberately use the ordinary rank-local
+`LayerwiseOffloadHook`; this preserves an encoder's existing TP shard and does
+not add it to the DiT AllGather group. Planned encoder and VAE components in
+`on_demand_component_paths` are moved only around the model's encode/decode
+phase. Unselected components remain accelerator-resident.
+
 ## Parallelism compatibility
 
 | Parallelism | DLO + AllGather | DLO without AllGather |
@@ -132,6 +147,10 @@ loader path.
 
 Current source-level validation includes:
 
+- component-list parsing and invalid DLO-without-`dit` rejection;
+- default/all and DiT-only encoder/VAE placement;
+- rank-local encoder block hook setup and cleanup for ordinary layerwise and DLO;
+
 - HSDP + DLO + AllGather rejection;
 - HSDP + DLO without AllGather acceptance at configuration level;
 - TP rejection in the DLO+AllGather mmap path;
@@ -139,7 +158,6 @@ Current source-level validation includes:
 - DP request-wave validation for denoising-step compatibility;
 - sharding, double-buffer, AllGather-size, and heterogeneous-block regression
   tests.
-
 The highest-value missing coverage is end-to-end numerical comparison against
 ordinary layerwise offload for DP+SP, TP+no-AllGather, and HSDP+SP+no-AllGather
 on the target CUDA/NCCL or CANN/HCCL hardware.

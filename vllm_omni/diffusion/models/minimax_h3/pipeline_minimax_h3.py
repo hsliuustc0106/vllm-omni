@@ -45,6 +45,11 @@ from vllm_omni.diffusion.models.interface import (
 )
 from vllm_omni.diffusion.models.progress_bar import ProgressBarMixin
 from vllm_omni.diffusion.offloader import OffloadPlan
+from vllm_omni.diffusion.offloader.base import (
+    TEXT_ENCODER_COMPONENT,
+    VAE_COMPONENT,
+    should_offload_component,
+)
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import (
     DiffusionPipelineProfilerMixin,
 )
@@ -714,10 +719,8 @@ class MiniMaxH3Pipeline(
                     fall_back_to_pt=False,
                 )
             )
-        stage_components = bool(
-            od_config.enable_layerwise_offload or getattr(od_config, "enable_distributed_layerwise_offload", False)
-        )
-        component_load_device = torch.device("cpu") if stage_components else self.device
+        stage_vae = should_offload_component(od_config, VAE_COMPONENT)
+        component_load_device = torch.device("cpu") if stage_vae else self.device
         self.video_vae = MiniMaxH3VideoVAE(
             os.path.join(model_path, "video_vae"),
             device=self.device,
@@ -1136,36 +1139,34 @@ class MiniMaxH3Pipeline(
         input_ids: torch.Tensor,
         vision_kwargs: dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        if self.od_config.enable_cpu_offload and not getattr(
-            self.od_config, "enable_distributed_layerwise_offload", False
-        ):
+        model_level_offload = bool(
+            self.od_config.enable_cpu_offload
+            and not self.od_config.enable_layerwise_offload
+            and not getattr(
+                self.od_config,
+                "enable_distributed_layerwise_offload",
+                False,
+            )
+        )
+        if model_level_offload:
             # Invoke nn.Module.__call__ so the generic model-level offloader
             # swaps the resident DiT and encoder.
             return self.text_encoder(input_ids, **vision_kwargs)
 
-        if self.od_config.enable_layerwise_offload or getattr(
-            self.od_config, "enable_distributed_layerwise_offload", False
-        ):
-            # Layerwise DiT offload already provides the low-residency encoder
-            # phase used by the checkpoint reference.
+        if should_offload_component(self.od_config, TEXT_ENCODER_COMPONENT):
             self.text_encoder.load_to_device()
             try:
                 return self.text_encoder.encode_ids(input_ids, **vision_kwargs)
             finally:
                 self.text_encoder.offload_to_cpu()
 
-        # Keep both Qwen and DiT resident across requests. Moving either model
-        # here makes encoder latency include a tens-of-gigabytes PCIe transfer,
-        # which defeats the no-offload contract.
+        # Keep Qwen resident when it is not selected for layerwise offload.
         self.text_encoder.load_to_device()
         return self.text_encoder.encode_ids(input_ids, **vision_kwargs)
 
     def _uses_manual_component_offload(self) -> bool:
         od_config = getattr(self, "od_config", None)
-        return bool(
-            getattr(od_config, "enable_layerwise_offload", False)
-            or getattr(od_config, "enable_distributed_layerwise_offload", False)
-        )
+        return bool(od_config is not None and should_offload_component(od_config, VAE_COMPONENT))
 
     @contextmanager
     def _component_on_device(self, component: nn.Module):

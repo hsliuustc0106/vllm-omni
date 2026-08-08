@@ -996,6 +996,7 @@ class AsyncOmniEngine:
             "enable_cpu_offload": kwargs.get("enable_cpu_offload", False),
             "enable_layerwise_offload": kwargs.get("enable_layerwise_offload", False),
             "enable_distributed_layerwise_offload": kwargs.get("enable_distributed_layerwise_offload", False),
+            "layerwise_offload_components": kwargs.get("layerwise_offload_components", None),
             "dlo_use_allgather": kwargs.get("dlo_use_allgather", True),
             "dlo_resident_layers": kwargs.get("dlo_resident_layers", 0),
             "enforce_eager": False if kwargs.get("enforce_eager") is None else kwargs.get("enforce_eager"),

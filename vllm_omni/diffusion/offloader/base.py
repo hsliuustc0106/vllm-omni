@@ -13,6 +13,53 @@ from vllm_omni.diffusion.data import OmniDiffusionConfig
 
 logger = init_logger(__name__)
 
+DIT_COMPONENT = "dit"
+TEXT_ENCODER_COMPONENT = "text_encoder"
+VAE_COMPONENT = "vae"
+LAYERWISE_OFFLOAD_COMPONENTS = frozenset({DIT_COMPONENT, TEXT_ENCODER_COMPONENT, VAE_COMPONENT})
+
+
+def parse_layerwise_offload_components(value: object) -> frozenset[str]:
+    """Normalize the public component selection into validated names."""
+    if value is None:
+        return LAYERWISE_OFFLOAD_COMPONENTS
+    if isinstance(value, str):
+        values = value.split(",")
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        values = list(value)
+    else:
+        raise TypeError(
+            "layerwise_offload_components must be a comma-separated string "
+            f"or a sequence of strings, got {type(value).__name__}"
+        )
+
+    if any(not isinstance(item, str) for item in values):
+        raise TypeError("layerwise_offload_components entries must be strings")
+    components = [item.strip().lower() for item in values]
+    if not components or any(not item for item in components):
+        raise ValueError("layerwise_offload_components must not be empty")
+    unknown = sorted(set(components) - LAYERWISE_OFFLOAD_COMPONENTS)
+    if unknown:
+        raise ValueError(
+            "Unknown layerwise offload component(s): "
+            f"{', '.join(unknown)}. Choose from: "
+            f"{', '.join(sorted(LAYERWISE_OFFLOAD_COMPONENTS))}"
+        )
+    return frozenset(components)
+
+
+def should_offload_component(od_config: OmniDiffusionConfig, component: str) -> bool:
+    """Return whether an active layerwise strategy selected ``component``."""
+    if component not in LAYERWISE_OFFLOAD_COMPONENTS:
+        raise ValueError(f"Unknown layerwise offload component: {component}")
+    active = bool(
+        getattr(od_config, "enable_layerwise_offload", False)
+        or getattr(od_config, "enable_distributed_layerwise_offload", False)
+    )
+    if not active:
+        return False
+    return component in parse_layerwise_offload_components(getattr(od_config, "layerwise_offload_components", None))
+
 
 class OffloadStrategy(Enum):
     NONE = "none"
@@ -32,6 +79,10 @@ class OffloadConfig:
     dlo_use_allgather: bool = True
     dlo_resident_layers: int = 0  # leading DiT layers kept on device
     model_path: str | None = None  # checkpoint path for mmap weight loading
+    components: frozenset[str] = LAYERWISE_OFFLOAD_COMPONENTS
+
+    def offloads(self, component: str) -> bool:
+        return component in self.components
 
     @classmethod
     def from_od_config(cls, od_config: OmniDiffusionConfig) -> "OffloadConfig":
@@ -97,6 +148,21 @@ class OffloadConfig:
         else:
             strategy = OffloadStrategy.NONE
 
+        raw_components = getattr(od_config, "layerwise_offload_components", None)
+        components = parse_layerwise_offload_components(raw_components)
+        if raw_components is not None and strategy not in {
+            OffloadStrategy.LAYER_WISE,
+            OffloadStrategy.DISTRIBUTED_LAYER_WISE,
+        }:
+            raise ValueError(
+                "layerwise_offload_components requires layerwise or distributed layerwise offload to be enabled"
+            )
+        if strategy == OffloadStrategy.DISTRIBUTED_LAYER_WISE and DIT_COMPONENT not in components:
+            raise ValueError(
+                "Distributed layerwise offload requires the 'dit' component. "
+                "Use ordinary layerwise offload for encoder-only or VAE-only staging."
+            )
+
         # With dlo_use_allgather=False, do not add another DP shard. Each rank
         # streams the tensors produced by the standard loader, which may
         # already be TP-local shards. This avoids AllGather synchronization
@@ -138,6 +204,7 @@ class OffloadConfig:
             dlo_use_allgather=dlo_use_allgather,
             dlo_resident_layers=dlo_resident_layers,
             model_path=getattr(od_config, "model", None),
+            components=components,
         )
 
 
