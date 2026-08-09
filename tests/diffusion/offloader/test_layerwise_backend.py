@@ -162,13 +162,23 @@ class TestLayerwiseOffloadHook:
         assert torch.equal(next_block.weight, expected)
 
 
-def test_offload_preserves_packed_stride():
-    tensor = torch.arange(12).reshape(3, 4).t()
-    flat, stride = layerwise_backend_module._flatten_for_offload(tensor)
-    restored = layerwise_backend_module._restore_from_offload(flat.clone(), tensor.shape, stride)
+def test_layerwise_hook_preserves_packed_stride(patched_offload_runtime):
+    current_block = nn.Linear(2, 2)
+    next_block = nn.Module()
+    expected = torch.arange(12, dtype=torch.float32).reshape(3, 4).t()
+    next_block.weight = nn.Parameter(expected.clone(memory_format=torch.preserve_format))
+    hook = LayerwiseOffloadHook(
+        next_block=next_block,
+        device=torch.device("cpu"),
+        stream=DummyStream(),
+        pin_memory=False,
+    )
 
-    assert restored.stride() == tensor.stride() == (1, 4)
-    assert torch.equal(restored, tensor)
+    hook.initialize_hook(current_block)
+    hook.prefetch_layer(non_blocking=False)
+
+    assert next_block.weight.stride() == expected.stride() == (1, 4)
+    assert torch.equal(next_block.weight, expected)
 
 
 class _DummyBlock(nn.Module):
@@ -362,7 +372,7 @@ class TestLayerwiseComponentSelection:
         backend.disable()
         assert not pipeline.text_encoder._omni_layerwise_enabled
 
-    def test_dit_only_keeps_encoder_and_vae_resident(self, patched_offload_runtime):
+    def test_single_gpu_dit_only_keeps_encoder_and_vae_resident(self, patched_offload_runtime):
         pipeline = _ComponentPipeline()
         backend = LayerWiseOffloadBackend(
             OffloadConfig(
@@ -383,6 +393,22 @@ class TestLayerwiseComponentSelection:
         assert hasattr(pipeline.transformer.blocks[0], "_hook_registry")
 
         backend.disable()
+
+    def test_encoder_only_requires_streamable_offload_plan(self, patched_offload_runtime):
+        pipeline = nn.Module()
+        pipeline.transformer = _SingleBlockModel()
+        pipeline.text_encoder = _StagedEncoder()
+        backend = LayerWiseOffloadBackend(
+            OffloadConfig(
+                strategy=OffloadStrategy.LAYER_WISE,
+                pin_cpu_memory=False,
+                components=frozenset({"text_encoder"}),
+            ),
+            torch.device("cpu"),
+        )
+
+        with pytest.raises(ValueError, match="None of the selected layerwise offload components"):
+            backend.enable(pipeline)
 
 
 def _offload_od_config(**overrides):
