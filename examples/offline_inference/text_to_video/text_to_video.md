@@ -227,7 +227,8 @@ python text_to_video.py \
 - `--cfg-parallel-size`: set it to 2 to enable CFG Parallel. See more examples in [`user_guide`](../../../docs/user_guide/diffusion/parallelism_acceleration.md#cfg-parallel).
 - `--tensor-parallel-size`: tensor parallel size (effective for models that support TP, e.g. LTX2).
 - `--enable-cpu-offload`: enable CPU offloading for diffusion models.
-- `--enable-layerwise-offload`: enable layerwise offloading on DiT modules.
+- `--enable-layerwise-offload`: enable layerwise (blockwise) offloading.
+- `--layerwise-offload-components`: comma-separated component groups to offload (for example, `dit,text_encoder`).
 - `--frame-rate`: generation FPS for pipelines that require it (e.g., LTX2).
 - `--audio-sample-rate`: fallback audio sample rate when the pipeline returns audio.
 - `--quantization`: quantization method (such as `fp8` for FP8).

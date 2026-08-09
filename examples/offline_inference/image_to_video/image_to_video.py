@@ -211,7 +211,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--enable-layerwise-offload",
         action="store_true",
-        help="Enable layerwise (blockwise) offloading on DiT modules.",
+        help="Enable layerwise (blockwise) offloading.",
+    )
+    parser.add_argument(
+        "--layerwise-offload-components",
+        type=str,
+        default=None,
+        help="Comma-separated component groups to offload (for example: text_encoder,image_encoder).",
     )
     parser.add_argument(
         "--enforce-eager",
@@ -517,6 +523,7 @@ def main():
     omni_kwargs = dict(
         model=args.model,
         enable_layerwise_offload=args.enable_layerwise_offload,
+        layerwise_offload_components=args.layerwise_offload_components,
         vae_use_slicing=args.vae_use_slicing,
         vae_use_tiling=args.vae_use_tiling,
         boundary_ratio=args.boundary_ratio,

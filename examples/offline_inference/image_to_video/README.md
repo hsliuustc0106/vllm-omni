@@ -144,7 +144,8 @@ python image_to_video.py \
 | `--vae-use-slicing` | flag | off | Enable VAE slicing for memory optimization |
 | `--vae-use-tiling` | flag | off | Enable VAE tiling for memory optimization |
 | `--enable-cpu-offload` | flag | off | Enable CPU offloading for diffusion models |
-| `--enable-layerwise-offload` | flag | off | Enable layerwise offloading on DiT modules |
+| `--enable-layerwise-offload` | flag | off | Enable layerwise (blockwise) offloading |
+| `--layerwise-offload-components` | str | unset | Comma-separated component groups to offload (for example, `text_encoder,image_encoder`) |
 | `--cfg-parallel-size` | int | `1` | Set to `2` to enable CFG Parallel |
 | `--tensor-parallel-size` | int | `1` | Tensor parallel size (effective for models that support TP, e.g. LTX2) |
 | `--ulysses-degree` | int | `1` | Ulysses sequence parallel degree |
