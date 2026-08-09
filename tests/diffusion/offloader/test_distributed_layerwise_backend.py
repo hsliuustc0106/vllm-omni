@@ -1423,6 +1423,16 @@ class _ComponentVAE(nn.Module):
         return super().to(*args, **kwargs)
 
 
+class _PlainComponentEncoder(nn.Module):
+    """Standard encoder with no offload-specific lifecycle methods."""
+
+    def __init__(self):
+        super().__init__()
+        self.encoder = nn.Module()
+        self.encoder.block = nn.ModuleList([_DummyBlock(), _DummyBlock()])
+        self.final_norm = nn.Linear(2, 2)
+
+
 class _DistributedComponentPipeline(nn.Module):
     _offload_plan = OffloadPlan(
         encoder_block_attrs={"text_encoder": ("vision.blocks", "text_model.layers")},
@@ -1446,14 +1456,26 @@ class _LegacyDistributedComponentPipeline(nn.Module):
         self.vae = _ComponentVAE()
 
 
+class _GenericDistributedEncoderPipeline(nn.Module):
+    _offload_plan = OffloadPlan(
+        encoder_block_attrs={"text_encoder": ("encoder.block",)},
+    )
+
+    def __init__(self):
+        super().__init__()
+        self.transformer = _SingleBlockModel(num_blocks=2)
+        self.text_encoder = _PlainComponentEncoder()
+
+
 class TestDistributedComponentSelection:
-    def test_default_streams_encoder_and_stages_vae(self, patched_offload_runtime):
+    def test_all_streams_encoder_and_stages_vae(self, patched_offload_runtime):
         pipeline = _DistributedComponentPipeline()
         backend = DistributedLayerwiseOffloadBackend(
             OffloadConfig(
                 strategy=OffloadStrategy.DISTRIBUTED_LAYER_WISE,
                 pin_cpu_memory=False,
                 dlo_use_allgather=False,
+                components=frozenset({"all"}),
             ),
             torch.device("cpu"),
         )
@@ -1522,3 +1544,28 @@ class TestDistributedComponentSelection:
         assert pipeline.vae.offload_calls == 0
 
         backend.disable()
+
+    def test_standard_encoder_needs_only_declared_block_paths(self, patched_offload_runtime):
+        pipeline = _GenericDistributedEncoderPipeline()
+        backend = DistributedLayerwiseOffloadBackend(
+            OffloadConfig(
+                strategy=OffloadStrategy.DISTRIBUTED_LAYER_WISE,
+                pin_cpu_memory=False,
+                dlo_use_allgather=False,
+                components=frozenset({"dit", "text_encoder"}),
+            ),
+            torch.device("cpu"),
+        )
+
+        backend.enable(pipeline)
+
+        blocks = pipeline.text_encoder.encoder.block
+        assert pipeline.text_encoder._omni_layerwise_enabled
+        assert all(block._hook_registry.get_hook("layerwise_offload") is not None for block in blocks)
+        assert pipeline.text_encoder.final_norm.weight.numel() == 4
+
+        backend.disable()
+
+        assert not pipeline.text_encoder._omni_layerwise_enabled
+        assert all(block._hook_registry.get_hook("layerwise_offload") is None for block in blocks)
+        assert all(block.weight.numel() == 100 for block in blocks)

@@ -30,6 +30,14 @@ def test_pipeline_declares_layerwise_offload_components() -> None:
     assert Cosmos3OmniDiffusersPipeline._resident_modules == []
     assert hasattr(Cosmos3OmniDiffusersPipeline, "enable_omni_model_cpu_offload")
 
+    from vllm_omni.diffusion.models.cosmos3.transformer_cosmos3 import (
+        Cosmos3LanguageModel,
+        Cosmos3VFMTransformer,
+    )
+
+    assert Cosmos3LanguageModel._layerwise_offload_blocks_attrs == ["layers"]
+    assert Cosmos3VFMTransformer._layerwise_offload_blocks_attrs == ["gen_layers"]
+
 
 class StubScheduler:
     def __init__(

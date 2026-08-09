@@ -30,6 +30,16 @@ def test_wan22_i2v_postprocess_honors_request_output_type() -> None:
     assert output is video
 
 
+def test_i2v_pipeline_declares_text_and_image_encoder_offload_blocks() -> None:
+    plan = Wan22I2VPipeline._offload_plan
+
+    assert plan.encoder_block_attrs == {
+        "text_encoder": ("encoder.block",),
+        "image_encoder": ("vision_model.encoder.layers",),
+    }
+    assert plan.on_demand_component_paths == frozenset()
+
+
 def _make_i2v_pipeline(*, expand_timesteps: bool) -> Wan22I2VPipeline:
     pipeline = object.__new__(Wan22I2VPipeline)
     nn.Module.__init__(pipeline)

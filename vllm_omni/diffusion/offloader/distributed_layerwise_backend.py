@@ -28,12 +28,7 @@ from vllm.logger import init_logger
 from vllm_omni.diffusion.hooks import HookRegistry, ModelHook
 from vllm_omni.platforms import current_omni_platform
 
-from .base import (
-    TEXT_ENCODER_COMPONENT,
-    VAE_COMPONENT,
-    OffloadBackend,
-    OffloadConfig,
-)
+from .base import VAE_COMPONENT, OffloadBackend, OffloadConfig
 from .block_discovery import get_blocks_from_dit
 from .layerwise_backend import (
     disable_plan_encoder_layerwise_offload,
@@ -1184,7 +1179,14 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
             coord.ranks,
         )
 
-    def _register_on_demand_hook(self, module: nn.Module, label: str, *, stage_on_demand: bool = False) -> None:
+    def _register_on_demand_hook(
+        self,
+        module: nn.Module,
+        label: str,
+        *,
+        stage_on_demand: bool = False,
+        blockwise: bool = False,
+    ) -> None:
         """Prepare a pipeline-managed stage component or keep it resident.
 
         Components that expose an explicit stage lifecycle are initially
@@ -1197,6 +1199,8 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
             offload_to_cpu()
             logger.info("Prepared %s (%s) for pipeline-managed staged offload", label, module.__class__.__name__)
             return
+        if blockwise:
+            return
         module.to(self.device)
         logger.info("Moved %s (%s) to GPU (resident)", label, module.__class__.__name__)
 
@@ -1207,7 +1211,7 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         plan: OffloadPlan | None,
     ) -> bool:
         """Stream plan-declared encoder blocks on each rank without AllGather."""
-        enabled = enable_plan_encoder_layerwise_offload(
+        return enable_plan_encoder_layerwise_offload(
             module,
             name,
             plan,
@@ -1215,9 +1219,6 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
             stream=self.copy_stream,
             pin_memory=self.config.pin_cpu_memory,
         )
-        if enabled and module not in self._encoder_modules:
-            self._encoder_modules.append(module)
-        return enabled
 
     def _try_layerwise_offload_submodule(self, module: nn.Module, name: str, plan: OffloadPlan | None = None) -> bool:
         """Try to apply layerwise offload to a large submodule's blocks.
@@ -1462,13 +1463,15 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         # resident. Planned encoder block stacks use rank-local hooks so their
         # TP layout never enters the DiT AllGather group.
         for enc, enc_name in zip(modules.encoders, modules.encoder_names):
-            selected = self.config.offloads(TEXT_ENCODER_COMPONENT)
-            if selected:
-                self._try_layerwise_offload_encoder(enc, enc_name, plan)
+            selected = self.config.offloads_encoder(enc_name)
+            blockwise = selected and self._try_layerwise_offload_encoder(enc, enc_name, plan)
+            if blockwise:
+                self._encoder_modules.append(enc)
             self._register_on_demand_hook(
                 enc,
                 enc_name,
                 stage_on_demand=bool(selected and plan is not None and enc_name in plan.on_demand_component_paths),
+                blockwise=blockwise,
             )
         for vae, vae_name in zip(modules.vaes, modules.vae_names):
             selected = self.config.offloads(VAE_COMPONENT)

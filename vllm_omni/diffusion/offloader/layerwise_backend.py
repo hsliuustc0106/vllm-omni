@@ -14,13 +14,7 @@ from vllm.logger import init_logger
 from vllm_omni.diffusion.hooks import HookRegistry, ModelHook
 from vllm_omni.platforms import current_omni_platform
 
-from .base import (
-    DIT_COMPONENT,
-    TEXT_ENCODER_COMPONENT,
-    VAE_COMPONENT,
-    OffloadBackend,
-    OffloadConfig,
-)
+from .base import DIT_COMPONENT, VAE_COMPONENT, OffloadBackend, OffloadConfig
 from .module_collector import ModuleDiscovery
 from .offload_plan import OffloadPlan, get_offload_plan
 
@@ -310,6 +304,30 @@ def remove_block_hook(module: nn.Module) -> None:
         logger.debug("Removed offload hook from %s", module.__class__.__name__)
 
 
+def _move_encoder_non_block_state_to_device(
+    module: nn.Module,
+    block_groups: list[nn.ModuleList],
+    device: torch.device,
+) -> None:
+    """Keep encoder state outside streamed block lists resident on device."""
+    block_tensors = {
+        id(tensor)
+        for blocks in block_groups
+        for block in blocks
+        for tensor in chain(block.parameters(), block.buffers())
+    }
+    for tensor in chain(module.parameters(), module.buffers()):
+        if id(tensor) in block_tensors:
+            continue
+        local = tensor.to_local() if isinstance(tensor, DTensor) else tensor
+        if local.device == device:
+            continue
+        LayerwiseOffloadHook._set_tensor_storage(
+            tensor,
+            local.to(device, non_blocking=True),
+        )
+
+
 def enable_plan_encoder_layerwise_offload(
     module: nn.Module,
     name: str,
@@ -322,11 +340,6 @@ def enable_plan_encoder_layerwise_offload(
     """Apply rank-local layerwise hooks to plan-declared encoder stacks."""
     if plan is None or name not in plan.encoder_block_attrs:
         return False
-    if not callable(getattr(module, "load_to_device", None)) or not callable(getattr(module, "offload_to_cpu", None)):
-        raise ValueError(
-            f"Encoder {name!r} declares blockwise offload paths but must "
-            "implement load_to_device() and offload_to_cpu()"
-        )
     if getattr(module, "_omni_layerwise_enabled", False):
         return True
 
@@ -357,6 +370,7 @@ def enable_plan_encoder_layerwise_offload(
 
     if not hooks:
         return False
+    _move_encoder_non_block_state_to_device(module, block_groups, device)
     module._omni_layerwise_hooks = hooks
     module._omni_layerwise_block_groups = block_groups
     module._omni_layerwise_enabled = True
@@ -373,6 +387,10 @@ def disable_plan_encoder_layerwise_offload(module: nn.Module) -> None:
     """Remove hooks installed by :func:`enable_plan_encoder_layerwise_offload`."""
     if not getattr(module, "_omni_layerwise_enabled", False):
         return
+    for hook in getattr(module, "_omni_layerwise_hooks", []):
+        hook.prefetch_layer(non_blocking=False)
+    current_omni_platform.synchronize()
+
     for blocks in getattr(module, "_omni_layerwise_block_groups", []):
         for block in blocks:
             remove_block_hook(block)
@@ -434,7 +452,7 @@ class LayerWiseOffloadBackend(OffloadBackend):
             logger.warning("No DiT/transformer modules found, skipping layer-wise offloading")
 
         for enc, enc_name in zip(modules.encoders, modules.encoder_names):
-            selected = self.config.offloads(TEXT_ENCODER_COMPONENT)
+            selected = self.config.offloads_encoder(enc_name)
             blockwise = selected and enable_plan_encoder_layerwise_offload(
                 enc,
                 enc_name,

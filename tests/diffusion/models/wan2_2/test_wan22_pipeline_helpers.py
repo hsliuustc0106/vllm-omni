@@ -18,6 +18,13 @@ from vllm_omni.diffusion.models.wan2_2.pipeline_wan2_2 import (
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu, pytest.mark.diffusion]
 
 
+def test_t2v_pipeline_declares_text_encoder_offload_blocks() -> None:
+    plan = wan22_module.Wan22Pipeline._offload_plan
+
+    assert plan.encoder_block_attrs == {"text_encoder": ("encoder.block",)}
+    assert plan.on_demand_component_paths == frozenset()
+
+
 class _LatentDist:
     def sample(self, generator):
         assert isinstance(generator, torch.Generator)

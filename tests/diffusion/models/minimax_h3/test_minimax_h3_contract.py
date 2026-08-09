@@ -1048,21 +1048,17 @@ def test_model_offload_uses_hooked_text_encoder_call():
     pipeline.text_encoder.load_to_device.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "offload_flag",
-    ["enable_layerwise_offload", "enable_distributed_layerwise_offload"],
-)
-def test_layerwise_offload_releases_text_encoder(offload_flag):
+def test_layerwise_default_group_releases_text_encoder():
     from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
 
     pipeline = object.__new__(MiniMaxH3Pipeline)
     torch.nn.Module.__init__(pipeline)
     pipeline.od_config = SimpleNamespace(
         enable_cpu_offload=False,
-        enable_layerwise_offload=False,
+        enable_layerwise_offload=True,
         enable_distributed_layerwise_offload=False,
+        layerwise_offload_components="default",
     )
-    setattr(pipeline.od_config, offload_flag, True)
     pipeline.text_encoder = Mock()
     expected = torch.ones(2, 3)
     pipeline.text_encoder.encode_ids.return_value = expected
@@ -1096,7 +1092,7 @@ def test_layerwise_dit_only_keeps_text_encoder_resident():
     pipeline.text_encoder.offload_to_cpu.assert_not_called()
 
 
-def test_distributed_layerwise_offload_releases_text_encoder():
+def test_distributed_layerwise_all_releases_text_encoder():
     from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
 
     pipeline = object.__new__(MiniMaxH3Pipeline)
@@ -1105,6 +1101,7 @@ def test_distributed_layerwise_offload_releases_text_encoder():
         enable_cpu_offload=False,
         enable_layerwise_offload=False,
         enable_distributed_layerwise_offload=True,
+        layerwise_offload_components="all",
     )
     pipeline.text_encoder = Mock()
     expected = torch.ones(2, 3)
@@ -1146,7 +1143,7 @@ def test_standalone_audio_conditions_stage_audio_vae(monkeypatch):
     assert lengths == [4, 5]
 
 
-def test_distributed_layerwise_offload_stages_vae_component():
+def test_distributed_layerwise_all_stages_vae_component():
     from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
 
     pipeline = object.__new__(MiniMaxH3Pipeline)
@@ -1154,6 +1151,7 @@ def test_distributed_layerwise_offload_stages_vae_component():
     pipeline.od_config = SimpleNamespace(
         enable_layerwise_offload=False,
         enable_distributed_layerwise_offload=True,
+        layerwise_offload_components="all",
     )
     component = Mock()
 

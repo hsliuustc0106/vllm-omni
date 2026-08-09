@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Declarative OffloadPlan for distributed layerwise offload.
+"""Declarative model capabilities for component layerwise offload.
 
-Models declare this as a class attribute ``_offload_plan`` on the
-pipeline class. When present, the offloader uses it instead of
-heuristic block discovery.
+Models declare an ``_offload_plan`` class attribute on the pipeline. Both the
+ordinary and distributed layerwise backends consume the same plan instead of
+embedding model-specific block paths in backend code.
 """
 
 from __future__ import annotations
@@ -16,12 +16,11 @@ from torch import nn
 
 @dataclass(frozen=True)
 class OffloadPlan:
-    """Optional declarative metadata for distributed layerwise offload.
+    """Optional declarative metadata for component layerwise offload.
 
     Models declare this as a class attribute ``_offload_plan`` on the
-    pipeline class.  When present, the offloader uses it instead of
-    heuristic block discovery, making it easier to support new models
-    without offload-specific logic in constructor or forward code.
+    pipeline class. When present, both layerwise backends use it instead of
+    model-specific backend branches, making new integrations data-driven.
 
     If not declared, the offloader falls back to:
     1. ``_layerwise_offload_blocks_attrs`` on each DiT module class.
