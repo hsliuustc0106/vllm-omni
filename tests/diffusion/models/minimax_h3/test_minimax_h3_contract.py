@@ -1117,6 +1117,35 @@ def test_distributed_layerwise_offload_releases_text_encoder():
     pipeline.text_encoder.offload_to_cpu.assert_called_once_with()
 
 
+def test_standalone_audio_conditions_stage_audio_vae(monkeypatch):
+    from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
+    from vllm_omni.diffusion.models.minimax_h3 import (
+        pipeline_minimax_h3 as pipeline_module,
+    )
+
+    pipeline = object.__new__(MiniMaxH3Pipeline)
+    torch.nn.Module.__init__(pipeline)
+    pipeline.device = torch.device("cpu")
+    pipeline.od_config = SimpleNamespace(
+        enable_layerwise_offload=True,
+        enable_distributed_layerwise_offload=False,
+        layerwise_offload_components="vae",
+    )
+    pipeline.audio_vae = Mock()
+    pipeline.audio_vae.encode_waveform.side_effect = [
+        (torch.ones(2, 3), 4),
+        (torch.full((1, 3), 2.0), 5),
+    ]
+    monkeypatch.setattr(pipeline_module, "_dit_rank_world", lambda: (None, 0, 1))
+
+    rows, lengths = pipeline._encode_audio_conditions([(torch.ones(8), 16_000), (torch.ones(12), 24_000)])
+
+    pipeline.audio_vae.load_to_device.assert_called_once_with()
+    pipeline.audio_vae.offload_to_cpu.assert_called_once_with()
+    assert rows.shape == (3, 3)
+    assert lengths == [4, 5]
+
+
 def test_distributed_layerwise_offload_stages_vae_component():
     from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
 

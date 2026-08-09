@@ -1255,7 +1255,8 @@ class MiniMaxH3Pipeline(
                     max_samples = int(round(max_duration_seconds * int(sample_rate)))
                     waveform = waveform[..., :max_samples]
                 bounded_audios.append((waveform, sample_rate))
-            encoded = [self.audio_vae.encode_waveform(*audio) for audio in bounded_audios]
+            with self._component_on_device(self.audio_vae):
+                encoded = [self.audio_vae.encode_waveform(*audio) for audio in bounded_audios]
             rows = torch.cat([item[0] for item in encoded])
             lengths = torch.tensor(
                 [int(item[1]) for item in encoded],

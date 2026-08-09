@@ -1457,6 +1457,18 @@ class TestDistributedComponentSelection:
 
         backend.disable()
 
+        assert not pipeline.text_encoder._omni_layerwise_enabled
+        encoder_blocks = [
+            *pipeline.text_encoder.vision.blocks,
+            *pipeline.text_encoder.text_model.layers,
+        ]
+        assert all(block._hook_registry.get_hook("layerwise_offload") is None for block in encoder_blocks)
+
+        backend.enable(pipeline)
+        assert pipeline.text_encoder._omni_layerwise_enabled
+        assert len(pipeline.text_encoder._omni_layerwise_hooks) == 4
+        backend.disable()
+
     def test_dit_only_keeps_encoder_and_vae_resident(self, patched_offload_runtime):
         pipeline = _DistributedComponentPipeline()
         backend = DistributedLayerwiseOffloadBackend(
