@@ -347,6 +347,16 @@ class _ComponentPipeline(nn.Module):
         self.vae = _StagedVAE()
 
 
+class _LegacyComponentPipeline(nn.Module):
+    """Pipeline with DiT block metadata but no auxiliary OffloadPlan."""
+
+    def __init__(self):
+        super().__init__()
+        self.transformer = _SingleBlockModel()
+        self.text_encoder = _StagedEncoder()
+        self.vae = _StagedVAE()
+
+
 class TestLayerwiseComponentSelection:
     def test_encoder_only_streams_planned_blocks(self, patched_offload_runtime):
         pipeline = _ComponentPipeline()
@@ -409,6 +419,27 @@ class TestLayerwiseComponentSelection:
 
         with pytest.raises(ValueError, match="None of the selected layerwise offload components"):
             backend.enable(pipeline)
+
+    def test_default_selection_preserves_unplanned_auxiliaries(self, patched_offload_runtime):
+        pipeline = _LegacyComponentPipeline()
+        backend = LayerWiseOffloadBackend(
+            OffloadConfig(
+                strategy=OffloadStrategy.LAYER_WISE,
+                pin_cpu_memory=False,
+            ),
+            torch.device("cpu"),
+        )
+
+        backend.enable(pipeline)
+
+        assert hasattr(pipeline.transformer.blocks[0], "_hook_registry")
+        assert not hasattr(pipeline.text_encoder, "_omni_layerwise_enabled")
+        assert pipeline.text_encoder.to_calls == 1
+        assert pipeline.text_encoder.offload_calls == 0
+        assert pipeline.vae.to_calls == 1
+        assert pipeline.vae.offload_calls == 0
+
+        backend.disable()
 
 
 def _offload_od_config(**overrides):

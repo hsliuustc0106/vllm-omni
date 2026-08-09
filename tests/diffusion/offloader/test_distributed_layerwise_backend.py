@@ -1436,6 +1436,16 @@ class _DistributedComponentPipeline(nn.Module):
         self.vae = _ComponentVAE()
 
 
+class _LegacyDistributedComponentPipeline(nn.Module):
+    """Pipeline with DiT block metadata but no auxiliary OffloadPlan."""
+
+    def __init__(self):
+        super().__init__()
+        self.transformer = _SingleBlockModel(num_blocks=2)
+        self.text_encoder = _ComponentEncoder()
+        self.vae = _ComponentVAE()
+
+
 class TestDistributedComponentSelection:
     def test_default_streams_encoder_and_stages_vae(self, patched_offload_runtime):
         pipeline = _DistributedComponentPipeline()
@@ -1488,5 +1498,27 @@ class TestDistributedComponentSelection:
         assert pipeline.text_encoder.to_calls == 1
         assert pipeline.vae.offload_calls == 0
         assert pipeline.vae.to_calls == 1
+
+        backend.disable()
+
+    def test_default_selection_preserves_unplanned_auxiliaries(self, patched_offload_runtime):
+        pipeline = _LegacyDistributedComponentPipeline()
+        backend = DistributedLayerwiseOffloadBackend(
+            OffloadConfig(
+                strategy=OffloadStrategy.DISTRIBUTED_LAYER_WISE,
+                pin_cpu_memory=False,
+                dlo_use_allgather=False,
+            ),
+            torch.device("cpu"),
+        )
+
+        backend.enable(pipeline)
+
+        assert hasattr(pipeline.transformer.blocks[0], "_hook_registry")
+        assert not hasattr(pipeline.text_encoder, "_omni_layerwise_enabled")
+        assert pipeline.text_encoder.to_calls == 1
+        assert pipeline.text_encoder.offload_calls == 0
+        assert pipeline.vae.to_calls == 1
+        assert pipeline.vae.offload_calls == 0
 
         backend.disable()
