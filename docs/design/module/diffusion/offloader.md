@@ -4,7 +4,7 @@ kind: module
 status: draft
 owners:
   - "@yuanheng-zhao"
-  - "@Isotr0py"
+  - "@david6666666"
   - "@lishunyang12"
 primary_code_paths:
   - vllm_omni/diffusion/offloader/**
