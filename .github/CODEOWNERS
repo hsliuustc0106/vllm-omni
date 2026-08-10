@@ -50,23 +50,23 @@
 /vllm_omni/engine/ @tzhouam @fake0fan
 # File-level overrides: input/output modality contracts own these engine files
 # — docs/design/module/input_output_modality_contracts.md
-/vllm_omni/engine/messages.py @Sy0307 @amy-why-3459 @Gaohan123
-/vllm_omni/engine/serialization.py @Sy0307 @amy-why-3459 @Gaohan123
-/vllm_omni/engine/mm_outputs.py @Sy0307 @amy-why-3459 @Gaohan123
-/vllm_omni/engine/output_modality.py @Sy0307 @amy-why-3459 @Gaohan123
-/vllm_omni/engine/output_processor.py @Sy0307 @amy-why-3459 @Gaohan123
+/vllm_omni/engine/messages.py @Sy0307 @amy-why-3459 @Gaohan123 @alex-jw-brooks
+/vllm_omni/engine/serialization.py @Sy0307 @amy-why-3459 @Gaohan123 @alex-jw-brooks
+/vllm_omni/engine/mm_outputs.py @Sy0307 @amy-why-3459 @Gaohan123 @alex-jw-brooks
+/vllm_omni/engine/output_modality.py @Sy0307 @amy-why-3459 @Gaohan123 @alex-jw-brooks
+/vllm_omni/engine/output_processor.py @Sy0307 @amy-why-3459 @Gaohan123 @alex-jw-brooks
 
 # Input/output modality contracts — docs/design/module/input_output_modality_contracts.md
-/vllm_omni/inputs/ @Sy0307 @amy-why-3459 @alex-jw-brooks
-/vllm_omni/outputs/ @Sy0307 @amy-why-3459 @alex-jw-brooks
-/vllm_omni/request.py @Sy0307 @amy-why-3459 @alex-jw-brooks
-/vllm_omni/data_entry_keys.py @Sy0307 @amy-why-3459 @alex-jw-brooks
+/vllm_omni/inputs/ @Sy0307 @amy-why-3459 @Gaohan123 @alex-jw-brooks
+/vllm_omni/outputs/ @Sy0307 @amy-why-3459 @Gaohan123 @alex-jw-brooks
+/vllm_omni/request.py @Sy0307 @amy-why-3459 @Gaohan123 @alex-jw-brooks
+/vllm_omni/data_entry_keys.py @Sy0307 @amy-why-3459 @Gaohan123 @alex-jw-brooks
 
 # Entrypoints and serving boundaries — docs/design/module/entrypoints.md
 /vllm_omni/entrypoints/ @alex-jw-brooks @linyueqian @NickCao
 # File-level overrides within entrypoints/
 /vllm_omni/entrypoints/openai/errors.py @alex-jw-brooks @NickCao
-/vllm_omni/entrypoints/cli/benchmark/ @alex-jw-brooks
+/vllm_omni/entrypoints/cli/benchmark/ @alex-jw-brooks @Bounty-hunter
 
 # Error contracts — docs/design/module/error_contracts.md
 /vllm_omni/errors.py @alex-jw-brooks @NickCao
@@ -94,15 +94,15 @@
 /vllm_omni/quantization/ @david6666666 @Isotr0py @lishunyang12
 
 # Observability — docs/design/module/observability.md
-/vllm_omni/metrics/ @lishunyang12
+/vllm_omni/metrics/ @lishunyang12 @vraiti
 
 # Profiling — docs/design/module/profiling.md
 /vllm_omni/profiler/ @gcanlin
 
 # Benchmarking (in-tree) — docs/design/module/benchmarking.md
-/vllm_omni/benchmarks/ @alex-jw-brooks
+/vllm_omni/benchmarks/ @alex-jw-brooks @Bounty-hunter
 
-# LoRA (no dedicated design doc; preserves prior ownership)
+# LoRA (no dedicated design doc; ownership intentionally narrowed)
 /vllm_omni/lora/ @SamitHuang @wtomin
 
 # Transformers utils (related path only in design docs; preserves prior ownership)

@@ -16,7 +16,7 @@ primary_code_path_owners:
     owners:
       - "@david6666666"
       - "@lishunyang12"
-related_code_paths:
+related_code_paths: []
 depends_on:
   - ar_runtime.md
   - diffusion/index.md
