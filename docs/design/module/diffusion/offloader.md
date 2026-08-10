@@ -5,6 +5,7 @@ status: draft
 owners:
   - "@yuanheng-zhao"
   - "@Isotr0py"
+  - "@lishunyang12"
 primary_code_paths:
   - vllm_omni/diffusion/offloader/**
 related_code_paths:
