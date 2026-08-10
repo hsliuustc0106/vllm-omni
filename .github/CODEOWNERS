@@ -44,7 +44,7 @@
 
 # Autoregressive runtime — docs/design/module/ar_runtime.md
 /vllm_omni/core/ @tzhouam @yinpeiqi @fake0fan @Sy0307 @Gaohan123
-/vllm_omni/worker/ @tzhouam @yinpeiqi @fake0fan @Sy0307
+/vllm_omni/worker/ @tzhouam @yinpeiqi @fake0fan @Sy0307 @Gaohan123
 
 # Engine orchestration & stage runtime — docs/design/module/engine_orchestration.md, stage_runtime.md
 /vllm_omni/engine/ @tzhouam @fake0fan
