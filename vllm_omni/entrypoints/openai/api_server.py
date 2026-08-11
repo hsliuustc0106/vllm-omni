@@ -996,9 +996,11 @@ async def omni_init_app_state(
     )
 
     # Warm up chat template processing to avoid first-request latency
-    # Upstream f5ffc59b6a removed OpenAIServingChat.warmup() and moved the
-    # warmup onto the renderer (OnlineRenderer.warmup()); mirror upstream.
-    state.online_renderer.warmup()
+    # Upstream f5ffc59b6a moved warmup onto OnlineRenderer. Accelerator
+    # images can temporarily lag that renderer API, where warmup is optional.
+    renderer_warmup = getattr(state.online_renderer, "warmup", None)
+    if renderer_warmup is not None:
+        renderer_warmup()
 
     state.openai_serving_completion = (
         OpenAIServingCompletion(

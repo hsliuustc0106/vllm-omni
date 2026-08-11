@@ -22,6 +22,8 @@ _ARCH_TO_MODEL_TYPE: dict[str, str] = {
     "GLMTTSForConditionalGeneration": "glm_tts",
     "IndexTTS2S2MelDecoder": "indextts2",
     "IndexTTS2TalkerForConditionalGeneration": "indextts2",
+    "IndexTTS25S2MelDecoder": "indextts2_5",
+    "IndexTTS25TalkerForConditionalGeneration": "indextts2_5",
     "OmniVoiceModel": "omnivoice",
     # PersonaPlex ships an empty config.json, so create_model_config() must patch
     # model_type=personaplex from the arch name or the staged pipeline can't load
@@ -44,6 +46,7 @@ def _register_omni_hf_configs() -> None:
 
         from vllm_omni.model_executor.models.indextts2.configuration_indextts2 import (
             IndexTTS2Config,
+            IndexTTS25Config,
         )
         from vllm_omni.model_executor.models.ming_tts.config_ming_tts import (
             MingDenseConfig,
@@ -79,6 +82,7 @@ def _register_omni_hf_configs() -> None:
         ("dense", MingDenseConfig),
         ("bailingmm", MingMoeConfig),
         ("indextts2", IndexTTS2Config),
+        ("indextts2_5", IndexTTS25Config),
         ("moss_tts_local", MossTTSLocalConfig),
         ("moss_tts_realtime", MossTTSRealtimeConfig),
         ("qwen3_tts", Qwen3TTSConfig),
@@ -250,7 +254,15 @@ class OmniEngineArgs(EngineArgs):
             if config_dict.get("model_type"):
                 return  # config.json already has model_type, no patching needed
         except Exception:
-            return  # can't load config, let vLLM handle the error
+            # The official IndexTTS 2.5 bundle has no HuggingFace config.json.
+            # Keep this exception model-scoped so other loader failures retain
+            # vLLM's normal error path.
+            if model_type != "indextts2_5" or not os.path.isdir(self.model):
+                return
+            config_path = os.path.join(self.model, "config.json")
+            if os.path.lexists(config_path):
+                return
+            config_dict = {}
 
         # Create a temp dir with a patched config.json
         temp_dir = tempfile.mkdtemp(prefix="omni_hf_config_")
