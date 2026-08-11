@@ -104,10 +104,16 @@ def register_omni_models_to_vllm():
 
     _register_omni_hf_configs()
 
-    supported_archs = ModelRegistry.get_supported_archs()
+    # Unconditionally (re)register every omni arch into the upstream global
+    # ModelRegistry: vLLM 0.27 added some omni archs (e.g.
+    # Qwen3OmniMoeForConditionalGeneration) to its own registry, but resolves
+    # them to upstream classes that lack omni features (e.g.
+    # buffer_realtime_audio for the realtime endpoint). Registering here
+    # overwrites those entries with the vllm-omni classes, which is the
+    # behavior entrypoints resolving through the global registry rely on
+    # (and matches OmniModelRegistry's omni-wins ordering).
     for arch, (mod_folder, mod_relname, cls_name) in _OMNI_MODELS.items():
-        if arch not in supported_archs:
-            ModelRegistry.register_model(arch, f"vllm_omni.model_executor.models.{mod_folder}.{mod_relname}:{cls_name}")
+        ModelRegistry.register_model(arch, f"vllm_omni.model_executor.models.{mod_folder}.{mod_relname}:{cls_name}")
 
     # Register omni-specific reasoning parsers (e.g., step_audio).
     import vllm_omni.reasoning  # noqa: F401

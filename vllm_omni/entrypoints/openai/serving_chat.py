@@ -83,6 +83,7 @@ from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.multimodal.media.connector import MediaConnector
 from vllm.outputs import RequestOutput
+from vllm.parser.mistral import MistralToolCall
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs import TokPrompt
@@ -96,7 +97,6 @@ from vllm.tokenizers.mistral import (
     validate_request_params,
 )
 from vllm.tool_parsers import ToolParser
-from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine.exceptions import EngineDeadError
