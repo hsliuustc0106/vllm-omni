@@ -53,7 +53,6 @@ _NON_STAGE_ENGINE_CLI_FIELDS = frozenset(
         "model",
         "omni",
         "output_modalities",
-        "stage_configs_path",
         "stage_id",
         "tokenizer",
     }
