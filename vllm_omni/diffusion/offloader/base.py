@@ -77,10 +77,12 @@ def should_offload_component(od_config: OmniDiffusionConfig, component: str) -> 
 
 
 class OffloadStrategy(Enum):
+    """Weight-residency granularity within one diffusion stage."""
+
     NONE = "none"
     MODEL_LEVEL = "model_level"  # Sequential offloading between DiT and encoders
-    LAYER_WISE = "layer_wise"  # Block-level
-    DISTRIBUTED_LAYER_WISE = "distributed_layer_wise"  # Block-level with DP sharding + H2D/AllGather overlap
+    LAYERWISE = "layerwise"  # Block-level
+    DISTRIBUTED_LAYERWISE = "distributed_layerwise"  # Block-level with DP sharding + H2D/AllGather overlap
 
 
 @dataclass
@@ -159,11 +161,11 @@ class OffloadConfig:
 
         # Determine strategy (mutual exclusion, distributed layer-wise takes priority)
         if enable_distributed_layerwise_offload:
-            strategy = OffloadStrategy.DISTRIBUTED_LAYER_WISE
+            strategy = OffloadStrategy.DISTRIBUTED_LAYERWISE
             if enable_layerwise_offload or enable_cpu_offload:
                 logger.info("Distributed layer-wise offloading takes priority, disabling other offloading strategies.")
         elif enable_layerwise_offload:
-            strategy = OffloadStrategy.LAYER_WISE
+            strategy = OffloadStrategy.LAYERWISE
             if enable_cpu_offload:
                 logger.info(
                     "Both model-level and layer-wise offloading enabled. "
@@ -177,13 +179,13 @@ class OffloadConfig:
         raw_components = getattr(od_config, "layerwise_offload_components", None)
         components = parse_layerwise_offload_components(raw_components)
         if raw_components is not None and strategy not in {
-            OffloadStrategy.LAYER_WISE,
-            OffloadStrategy.DISTRIBUTED_LAYER_WISE,
+            OffloadStrategy.LAYERWISE,
+            OffloadStrategy.DISTRIBUTED_LAYERWISE,
         }:
             raise ValueError(
                 "layerwise_offload_components requires layerwise or distributed layerwise offload to be enabled"
             )
-        if strategy == OffloadStrategy.DISTRIBUTED_LAYER_WISE and not (
+        if strategy == OffloadStrategy.DISTRIBUTED_LAYERWISE and not (
             ALL_COMPONENT in components or DIT_COMPONENT in components
         ):
             raise ValueError(

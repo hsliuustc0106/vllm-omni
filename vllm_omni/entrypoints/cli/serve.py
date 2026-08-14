@@ -707,8 +707,8 @@ class OmniServeCommand(CLISubcommand):
             "--layerwise-offload-components",
             type=str,
             default=None,
-            help="Comma-separated components controlled by layerwise offload: "
-            "dit,text_encoder,image_encoder,vae,all,default. The default "
+            help="Comma-separated model components within the diffusion stage "
+            "controlled by layerwise offload: dit,text_encoder,image_encoder,vae,all,default. The default "
             "selector expands to text_encoder,image_encoder,vae; omitting "
             "this option preserves legacy dit-only behavior. Distributed "
             "layerwise offload requires dit or all.",

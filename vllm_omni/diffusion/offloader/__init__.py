@@ -105,9 +105,9 @@ def get_offload_backend(
     # Create appropriate backend
     if config.strategy == OffloadStrategy.MODEL_LEVEL:
         return ModelLevelOffloadBackend(config, device)
-    elif config.strategy == OffloadStrategy.LAYER_WISE:
+    elif config.strategy == OffloadStrategy.LAYERWISE:
         return LayerWiseOffloadBackend(config, device)
-    elif config.strategy == OffloadStrategy.DISTRIBUTED_LAYER_WISE:
+    elif config.strategy == OffloadStrategy.DISTRIBUTED_LAYERWISE:
         return DistributedLayerwiseOffloadBackend(config, device)
     else:
         logger.error("Unknown offload strategy: %s", config.strategy)

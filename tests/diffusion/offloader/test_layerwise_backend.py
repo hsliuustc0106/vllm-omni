@@ -409,7 +409,7 @@ class TestLayerwiseComponentSelection:
         pipeline = _ComponentPipeline()
         backend = LayerWiseOffloadBackend(
             OffloadConfig(
-                strategy=OffloadStrategy.LAYER_WISE,
+                strategy=OffloadStrategy.LAYERWISE,
                 pin_cpu_memory=False,
                 components=frozenset({"text_encoder"}),
             ),
@@ -433,7 +433,7 @@ class TestLayerwiseComponentSelection:
         pipeline = _ComponentPipeline()
         backend = LayerWiseOffloadBackend(
             OffloadConfig(
-                strategy=OffloadStrategy.LAYER_WISE,
+                strategy=OffloadStrategy.LAYERWISE,
                 pin_cpu_memory=False,
                 components=frozenset({"dit"}),
             ),
@@ -457,7 +457,7 @@ class TestLayerwiseComponentSelection:
         pipeline.text_encoder = _StagedEncoder()
         backend = LayerWiseOffloadBackend(
             OffloadConfig(
-                strategy=OffloadStrategy.LAYER_WISE,
+                strategy=OffloadStrategy.LAYERWISE,
                 pin_cpu_memory=False,
                 components=frozenset({"text_encoder"}),
             ),
@@ -471,7 +471,7 @@ class TestLayerwiseComponentSelection:
         pipeline = _LegacyComponentPipeline()
         backend = LayerWiseOffloadBackend(
             OffloadConfig(
-                strategy=OffloadStrategy.LAYER_WISE,
+                strategy=OffloadStrategy.LAYERWISE,
                 pin_cpu_memory=False,
             ),
             torch.device("cpu"),
@@ -492,7 +492,7 @@ class TestLayerwiseComponentSelection:
         pipeline = _DualEncoderPipeline()
         backend = LayerWiseOffloadBackend(
             OffloadConfig(
-                strategy=OffloadStrategy.LAYER_WISE,
+                strategy=OffloadStrategy.LAYERWISE,
                 pin_cpu_memory=False,
                 components=frozenset({"image_encoder"}),
             ),
@@ -514,7 +514,7 @@ class TestLayerwiseComponentSelection:
         pipeline = _GenericEncoderPipeline()
         backend = LayerWiseOffloadBackend(
             OffloadConfig(
-                strategy=OffloadStrategy.LAYER_WISE,
+                strategy=OffloadStrategy.LAYERWISE,
                 pin_cpu_memory=False,
                 components=frozenset({"text_encoder"}),
             ),
@@ -638,5 +638,5 @@ class TestLayerwiseComponentConfig:
             )
         )
 
-        assert config.strategy is OffloadStrategy.LAYER_WISE
+        assert config.strategy is OffloadStrategy.LAYERWISE
         assert config.components == frozenset({"text_encoder"})
