@@ -24,6 +24,7 @@ from vllm_omni.diffusion.data import SHUTDOWN_MESSAGE, AsyncDiffusionOutput, Asy
 from vllm_omni.diffusion.executor.abstract import DiffusionExecutor
 from vllm_omni.diffusion.ipc import DIFFUSION_RPC_RESULT_ENVELOPE, unpack_diffusion_output_shm
 from vllm_omni.diffusion.sched.request_scheduler import build_request_batch_sampling_params_key
+from vllm_omni.diffusion.utils.future_utils import try_set_exception, try_set_result
 from vllm_omni.diffusion.worker import WorkerProc
 
 if TYPE_CHECKING:
@@ -870,9 +871,9 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
                     fut = self._rpc_futures.pop(msg.rpc_id, None) if msg.rpc_id else None
                 if fut is not None and not fut.done():
                     if msg.error:
-                        fut.set_exception(RuntimeError(msg.error))
+                        try_set_exception(fut, RuntimeError(msg.error))
                     else:
-                        fut.set_result(msg)
+                        try_set_result(fut, msg)
             elif msg.kind == AsyncOutputKind.OUTPUT_READY:
                 batch_id = msg.async_output_id
                 with self._futures_lock:
@@ -903,9 +904,9 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
                             pending = self._output_futures.pop(batch_id, None)
                             if pending is not None and not pending.done():
                                 if exc is not None:
-                                    pending.set_exception(exc)
+                                    try_set_exception(pending, exc)
                                 else:
-                                    pending.set_result(output_result)
+                                    try_set_result(pending, output_result)
                             else:
                                 fut = concurrent.futures.Future()
                                 if exc is not None:
@@ -933,7 +934,7 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
             with self._futures_lock:
                 pending = self._output_futures.pop(per_req_id, None)
                 if pending is not None and not pending.done():
-                    pending.set_result(per_req_result)
+                    try_set_result(pending, per_req_result)
                 else:
                     fut: concurrent.futures.Future = concurrent.futures.Future()
                     fut.set_result(per_req_result)
@@ -999,10 +1000,10 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
             with self._futures_lock:
                 for fut in self._rpc_futures.values():
                     if not fut.done():
-                        fut.set_exception(RuntimeError("Executor shut down"))
+                        try_set_exception(fut, RuntimeError("Executor shut down"))
                 for fut in self._output_futures.values():
                     if not fut.done():
-                        fut.set_exception(RuntimeError("Executor shut down"))
+                        try_set_exception(fut, RuntimeError("Executor shut down"))
                 self._rpc_futures.clear()
                 self._output_futures.clear()
                 self._batch_split_map.clear()

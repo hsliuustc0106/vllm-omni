@@ -418,3 +418,77 @@ class TestShutdownCleansUpFutures:
 
         assert len(executor._rpc_futures) == 0
         assert len(executor._output_futures) == 0
+
+
+class _RacyFuture(concurrent.futures.Future):
+    # done() always lies and reports False, to deterministically force the
+    # pump's check-then-act race window without needing real thread timing.
+    def done(self) -> bool:
+        return False
+
+
+def _racy_cancelled_future() -> concurrent.futures.Future:
+    fut = _RacyFuture()
+    fut.cancel()
+    assert fut.cancelled()
+    return fut
+
+
+class TestResultPumpCancelledFutureRace:
+    """Regression for #5793: a future cancelled concurrently with the pump's
+    resolve call (e.g. an asyncio.wait_for timeout, or a request abort) must
+    be dropped, not raise InvalidStateError and kill the pump thread.
+    """
+
+    def test_compute_done_racing_cancel_does_not_crash_pump(self):
+        executor = _make_executor()
+        fut = _racy_cancelled_future()
+        with executor._futures_lock:
+            executor._rpc_futures["1"] = fut
+
+        msg = AsyncDiffusionOutput(kind=AsyncOutputKind.COMPUTE_DONE, rpc_id="1", async_output_id="abc")
+        _feed_one_msg_to_pump(executor, msg)
+
+        assert fut.cancelled()
+
+    def test_output_ready_racing_cancel_does_not_crash_pump(self):
+        executor = _make_executor()
+        fut = _racy_cancelled_future()
+        with executor._futures_lock:
+            executor._output_futures["abc123"] = fut
+
+        msg = AsyncDiffusionOutput(
+            kind=AsyncOutputKind.OUTPUT_READY,
+            async_output_id="abc123",
+            output=DiffusionOutput(output="late"),
+        )
+        _feed_one_msg_to_pump(executor, msg)
+
+        assert fut.cancelled()
+
+    def test_batch_split_racing_cancel_does_not_crash_pump(self):
+        executor = _make_executor()
+        cancelled_fut = _racy_cancelled_future()
+        healthy_fut = concurrent.futures.Future()
+        with executor._futures_lock:
+            executor._output_futures["batch-1/r-aborted"] = cancelled_fut
+            executor._output_futures["batch-1/r-healthy"] = healthy_fut
+            executor._batch_split_map["batch-1"] = {
+                "batch-1/r-aborted": "r-aborted",
+                "batch-1/r-healthy": "r-healthy",
+            }
+
+        outputs = {
+            "r-aborted": DiffusionOutput(output="late"),
+            "r-healthy": DiffusionOutput(output="ok"),
+        }
+        msg = AsyncDiffusionOutput(
+            kind=AsyncOutputKind.OUTPUT_READY,
+            async_output_id="batch-1",
+            output=_FakeBatchOutput(outputs),
+        )
+        _feed_one_msg_to_pump(executor, msg)
+
+        assert cancelled_fut.cancelled()
+        assert healthy_fut.done()
+        assert healthy_fut.result(timeout=1.0) is outputs["r-healthy"]
