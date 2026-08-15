@@ -33,6 +33,10 @@ def test_wan22_i2v_postprocess_honors_request_output_type() -> None:
 def test_i2v_pipeline_declares_text_and_image_encoder_offload_blocks() -> None:
     plan = Wan22I2VPipeline._offload_plan
 
+    assert plan.encoder_component_types == {
+        "text_encoder": "text_encoder",
+        "image_encoder": "image_encoder",
+    }
     assert plan.encoder_block_attrs == {
         "text_encoder": ("encoder.block",),
         "image_encoder": ("vision_model.encoder.layers",),

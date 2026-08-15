@@ -426,18 +426,17 @@ class LayerWiseOffloadBackend(OffloadBackend):
     ) -> None:
         load_to_device = getattr(module, "load_to_device", None)
         offload_to_cpu = getattr(module, "offload_to_cpu", None)
-        if blockwise and not (callable(load_to_device) and callable(offload_to_cpu)):
-            raise ValueError(
-                f"Encoder {name!r} declares blockwise offload paths but must "
-                "implement load_to_device() and offload_to_cpu()"
-            )
-        if selected and stage_on_demand and callable(offload_to_cpu):
+        if selected and stage_on_demand:
+            if not (callable(load_to_device) and callable(offload_to_cpu)):
+                raise ValueError(
+                    f"Component {name!r} declares on-demand offload but must "
+                    "implement load_to_device() and offload_to_cpu()"
+                )
             offload_to_cpu()
             self._staged_components.append(module)
             logger.info("Prepared %s for pipeline-managed staged offload", name)
             return
         if blockwise:
-            load_to_device()
             return
         module.to(self.device)
 
@@ -452,7 +451,7 @@ class LayerWiseOffloadBackend(OffloadBackend):
             logger.warning("No DiT/transformer modules found, skipping layer-wise offloading")
 
         for enc, enc_name in zip(modules.encoders, modules.encoder_names):
-            selected = self.config.offloads_encoder(enc_name)
+            selected = self.config.offloads_encoder(enc_name, plan)
             blockwise = selected and enable_plan_encoder_layerwise_offload(
                 enc,
                 enc_name,
@@ -495,6 +494,11 @@ class LayerWiseOffloadBackend(OffloadBackend):
             for dit_module in modules.dits:
                 dit_module.to(self.device)
             self.enabled = bool(self._encoder_modules or self._staged_components)
+            if not self.enabled:
+                raise ValueError(
+                    "None of the selected layerwise offload components have "
+                    "a model-declared streamable or on-demand plan"
+                )
             return
 
         logger.info("Applying layer-wise offloading on %s", modules.dit_names)

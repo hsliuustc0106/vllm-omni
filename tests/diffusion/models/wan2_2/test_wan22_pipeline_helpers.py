@@ -21,6 +21,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu, pytest.mark.diffusion]
 def test_t2v_pipeline_declares_text_encoder_offload_blocks() -> None:
     plan = wan22_module.Wan22Pipeline._offload_plan
 
+    assert plan.encoder_component_types == {"text_encoder": "text_encoder"}
     assert plan.encoder_block_attrs == {"text_encoder": ("encoder.block",)}
     assert plan.on_demand_component_paths == frozenset()
 

@@ -357,6 +357,7 @@ class _PlainImageEncoder(nn.Module):
 
 class _ComponentPipeline(nn.Module):
     _offload_plan = OffloadPlan(
+        encoder_component_types={"text_encoder": "text_encoder"},
         encoder_block_attrs={"text_encoder": ("vision.blocks", "text_model.layers")},
         on_demand_component_paths=frozenset({"text_encoder", "vae"}),
     )
@@ -380,6 +381,7 @@ class _LegacyComponentPipeline(nn.Module):
 
 class _GenericEncoderPipeline(nn.Module):
     _offload_plan = OffloadPlan(
+        encoder_component_types={"text_encoder": "text_encoder"},
         encoder_block_attrs={"text_encoder": ("encoder.block",)},
     )
 
@@ -391,6 +393,10 @@ class _GenericEncoderPipeline(nn.Module):
 
 class _DualEncoderPipeline(nn.Module):
     _offload_plan = OffloadPlan(
+        encoder_component_types={
+            "text_encoder": "text_encoder",
+            "image_encoder": "image_encoder",
+        },
         encoder_block_attrs={
             "text_encoder": ("encoder.block",),
             "image_encoder": ("vision_model.encoder.layers",),
@@ -569,10 +575,10 @@ class TestLayerwiseComponentConfig:
         assert csv_config.components == frozenset({"dit", "text_encoder"})
         assert sequence_config.components == frozenset({"vae", "image_encoder"})
 
-    def test_omitted_selector_preserves_legacy_dit_only_behavior(self):
+    def test_omitted_selector_preserves_model_aware_behavior(self):
         config = OffloadConfig.from_od_config(_offload_od_config(enable_layerwise_offload=True))
 
-        assert config.components == frozenset({"dit"})
+        assert config.components == frozenset({"dit", "text_encoder", "image_encoder", "vae"})
 
     def test_sglang_all_and_default_aliases(self):
         all_config = OffloadConfig.from_od_config(
@@ -588,14 +594,17 @@ class TestLayerwiseComponentConfig:
             )
         )
 
-        assert all_config.components == frozenset({"all"})
+        assert all_config.components == frozenset({"dit", "text_encoder", "image_encoder", "vae"})
         assert default_config.components == frozenset({"text_encoder", "image_encoder", "vae"})
         assert all_config.offloads("dit")
-        assert all_config.offloads_encoder("mllm")
+        plan = OffloadPlan(encoder_component_types={"mllm": "text_encoder"})
+        assert all_config.offloads_encoder("mllm", plan)
         assert default_config.offloads_encoder("text_encoder_2")
         assert default_config.offloads_encoder("condition_text_encoder")
         assert default_config.offloads_encoder("image_encoder")
         assert not default_config.offloads_encoder("vision_encoder")
+        vision_plan = OffloadPlan(encoder_component_types={"vision_encoder": "image_encoder"})
+        assert default_config.offloads_encoder("vision_encoder", vision_plan)
 
     def test_unknown_component_is_rejected(self):
         with pytest.raises(ValueError, match="Unknown layerwise offload"):
@@ -627,7 +636,7 @@ class TestLayerwiseComponentConfig:
             )
         )
 
-        assert config.components == frozenset({"all"})
+        assert config.components == frozenset({"dit", "text_encoder", "image_encoder", "vae"})
         assert config.offloads("dit")
 
     def test_single_gpu_encoder_only_is_allowed(self):

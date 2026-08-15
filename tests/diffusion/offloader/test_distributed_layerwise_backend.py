@@ -1435,6 +1435,7 @@ class _PlainComponentEncoder(nn.Module):
 
 class _DistributedComponentPipeline(nn.Module):
     _offload_plan = OffloadPlan(
+        encoder_component_types={"text_encoder": "text_encoder"},
         encoder_block_attrs={"text_encoder": ("vision.blocks", "text_model.layers")},
         on_demand_component_paths=frozenset({"text_encoder", "vae"}),
     )
@@ -1458,6 +1459,7 @@ class _LegacyDistributedComponentPipeline(nn.Module):
 
 class _GenericDistributedEncoderPipeline(nn.Module):
     _offload_plan = OffloadPlan(
+        encoder_component_types={"text_encoder": "text_encoder"},
         encoder_block_attrs={"text_encoder": ("encoder.block",)},
     )
 

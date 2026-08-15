@@ -1204,22 +1204,6 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         module.to(self.device)
         logger.info("Moved %s (%s) to GPU (resident)", label, module.__class__.__name__)
 
-    def _try_layerwise_offload_encoder(
-        self,
-        module: nn.Module,
-        name: str,
-        plan: OffloadPlan | None,
-    ) -> bool:
-        """Stream plan-declared encoder blocks on each rank without AllGather."""
-        return enable_plan_encoder_layerwise_offload(
-            module,
-            name,
-            plan,
-            device=self.device,
-            stream=self.copy_stream,
-            pin_memory=self.config.pin_cpu_memory,
-        )
-
     def _try_layerwise_offload_submodule(self, module: nn.Module, name: str, plan: OffloadPlan | None = None) -> bool:
         """Try to apply layerwise offload to a large submodule's blocks.
         Resolution order:
@@ -1463,8 +1447,15 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         # resident. Planned encoder block stacks use rank-local hooks so their
         # TP layout never enters the DiT AllGather group.
         for enc, enc_name in zip(modules.encoders, modules.encoder_names):
-            selected = self.config.offloads_encoder(enc_name)
-            blockwise = selected and self._try_layerwise_offload_encoder(enc, enc_name, plan)
+            selected = self.config.offloads_encoder(enc_name, plan)
+            blockwise = selected and enable_plan_encoder_layerwise_offload(
+                enc,
+                enc_name,
+                plan,
+                device=self.device,
+                stream=self.copy_stream,
+                pin_memory=self.config.pin_cpu_memory,
+            )
             if blockwise:
                 self._encoder_modules.append(enc)
             self._register_on_demand_hook(

@@ -38,6 +38,9 @@ class OffloadPlan:
             device when ``dlo_resident_layers`` is nonzero. Keeping this
             model-declared avoids applying a consumer-GPU tuning knob to
             auxiliary or dual DiTs unintentionally.
+        encoder_component_types: Maps encoder paths to public selector types
+            (text_encoder or image_encoder). This declaration is used before
+            the compatibility name heuristic.
         encoder_block_attrs: Maps encoder paths to rank-local block-list paths.
             These blocks are streamed with ordinary layerwise hooks, never
             with the DiT AllGather group.
@@ -48,6 +51,7 @@ class OffloadPlan:
     block_attrs: dict[str, tuple[str, ...]] = field(default_factory=dict)
     offload_submodules: dict[str, str] = field(default_factory=dict)
     resident_dit_paths: frozenset[str] = field(default_factory=frozenset)
+    encoder_component_types: dict[str, str] = field(default_factory=dict)
     encoder_block_attrs: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 

@@ -436,6 +436,10 @@ def test_dlo_offload_plan_includes_token_refiner():
 
     assert MiniMaxH3Pipeline._offload_plan.offload_submodules == {"token_refiner": "blocks"}
     assert MiniMaxH3Pipeline._offload_plan.resident_dit_paths == frozenset({"transformer"})
+    assert MiniMaxH3Pipeline._offload_plan.encoder_component_types == {"text_encoder": "text_encoder"}
+    assert MiniMaxH3Pipeline._offload_plan.encoder_block_attrs == {
+        "text_encoder": ("vision.blocks", "text_model.layers")
+    }
 
 
 def test_joint_postprocess_is_multiprocessing_picklable():
@@ -1048,7 +1052,8 @@ def test_model_offload_uses_hooked_text_encoder_call():
     pipeline.text_encoder.load_to_device.assert_not_called()
 
 
-def test_layerwise_default_group_releases_text_encoder():
+@pytest.mark.parametrize("components", [None, "default", "all"])
+def test_layerwise_default_group_releases_text_encoder(components):
     from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
 
     pipeline = object.__new__(MiniMaxH3Pipeline)
@@ -1057,7 +1062,7 @@ def test_layerwise_default_group_releases_text_encoder():
         enable_cpu_offload=False,
         enable_layerwise_offload=True,
         enable_distributed_layerwise_offload=False,
-        layerwise_offload_components="default",
+        layerwise_offload_components=components,
     )
     pipeline.text_encoder = Mock()
     expected = torch.ones(2, 3)
@@ -1092,7 +1097,8 @@ def test_layerwise_dit_only_keeps_text_encoder_resident():
     pipeline.text_encoder.offload_to_cpu.assert_not_called()
 
 
-def test_distributed_layerwise_all_releases_text_encoder():
+@pytest.mark.parametrize("components", [None, "all"])
+def test_distributed_layerwise_all_releases_text_encoder(components):
     from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
 
     pipeline = object.__new__(MiniMaxH3Pipeline)
@@ -1101,7 +1107,7 @@ def test_distributed_layerwise_all_releases_text_encoder():
         enable_cpu_offload=False,
         enable_layerwise_offload=False,
         enable_distributed_layerwise_offload=True,
-        layerwise_offload_components="all",
+        layerwise_offload_components=components,
     )
     pipeline.text_encoder = Mock()
     expected = torch.ones(2, 3)

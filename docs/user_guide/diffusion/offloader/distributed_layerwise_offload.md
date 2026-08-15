@@ -28,6 +28,7 @@ parallel ranks may process different requests concurrently.
 # Four ranks with sharded host weights and AllGather
 vllm serve /path/to/model --omni \
   --enable-distributed-layerwise-offload \
+  --layerwise-offload-components dit,text_encoder,vae \
   --data-parallel-size 4
 
 # Standard-loader rank-local weights, without DLO AllGather
@@ -57,6 +58,7 @@ omni = Omni(
 | Flag | Meaning | Default |
 | --- | --- | --- |
 | `--enable-distributed-layerwise-offload` | Enable DLO | `false` |
+| `--layerwise-offload-components LIST` | Select DiT, encoder, and VAE categories; DLO requires `dit` | all categories |
 | `--data-parallel-size N` | DP ranks and AllGather weight-sharding group | `1` |
 | `--dlo-use-allgather` | Shard host weights and reconstruct with AllGather | `true` |
 | `--dlo-no-use-allgather` | Keep standard-loader rank-local weights | `false` |
@@ -85,14 +87,25 @@ from vllm_omni.diffusion.offloader import OffloadPlan
 
 class MyPipeline(nn.Module):
     _dit_modules = ["transformer"]
+    _encoder_modules = ["prompt_model"]
+    _vae_modules = ["vae"]
     _offload_plan = OffloadPlan(
         block_attrs={"transformer": ("blocks",)},
         offload_submodules={"context_encoder": "layers"},
+        encoder_component_types={"prompt_model": "text_encoder"},
+        encoder_block_attrs={"prompt_model": ("encoder.layers",)},
+        on_demand_component_paths=frozenset({"prompt_model", "vae"}),
     )
 ```
 
-When no plan exists, discovery falls back to
-`_layerwise_offload_blocks_attrs` and then heuristic attribute lookup.
+`encoder_component_types` maps arbitrary encoder paths to the public
+`text_encoder` or `image_encoder` selectors. Encoder blocks remain rank-local
+and never join the DiT AllGather group. On-demand components are loaded and
+offloaded by their pipeline phase.
+
+When no plan exists, DiT discovery falls back to
+`_layerwise_offload_blocks_attrs` and then heuristic attribute lookup;
+undeclared auxiliary components remain resident.
 
 ## Data-parallel concurrency
 

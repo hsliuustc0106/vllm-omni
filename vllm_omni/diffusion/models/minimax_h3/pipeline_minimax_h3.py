@@ -542,6 +542,7 @@ class MiniMaxH3Pipeline(
     _offload_plan: ClassVar[OffloadPlan] = OffloadPlan(
         offload_submodules={"token_refiner": "blocks"},
         resident_dit_paths=frozenset({"transformer"}),
+        encoder_component_types={"text_encoder": TEXT_ENCODER_COMPONENT},
         encoder_block_attrs={"text_encoder": ("vision.blocks", "text_model.layers")},
         on_demand_component_paths=frozenset({"text_encoder", "video_vae", "audio_vae"}),
     )

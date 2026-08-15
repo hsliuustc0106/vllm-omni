@@ -45,27 +45,3 @@ def is_materialized_tensor(t: torch.Tensor) -> bool:
         local_t = t.to_local()
         return not local_t.is_meta
     return not t.is_meta and t.data.numel() > 0
-
-
-def flatten_for_offload(tensor: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...] | None]:
-    """Flatten a dense tensor in storage order and retain packed strides."""
-    shape = tuple(tensor.shape)
-    stride = tuple(tensor.stride())
-    expected_stride = 1
-    for size, dim_stride in sorted(zip(shape, stride), key=lambda item: item[1]):
-        if size > 1:
-            if dim_stride != expected_stride:
-                return tensor.flatten(), None
-            expected_stride *= size
-    if expected_stride != tensor.numel():
-        return tensor.flatten(), None
-    return tensor.as_strided((tensor.numel(),), (1,), tensor.storage_offset()), stride
-
-
-def restore_from_offload(
-    flat_storage: torch.Tensor,
-    shape: torch.Size | tuple[int, ...],
-    stride: tuple[int, ...] | None,
-) -> torch.Tensor:
-    """Restore a tensor view from its offload buffer and saved layout."""
-    return flat_storage.view(shape) if stride is None else flat_storage.as_strided(shape, stride)

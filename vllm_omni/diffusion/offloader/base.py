@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 from dataclasses import dataclass
 from enum import Enum
 
@@ -10,6 +11,8 @@ from torch import nn
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.data import OmniDiffusionConfig
+
+from .offload_plan import OffloadPlan
 
 logger = init_logger(__name__)
 
@@ -24,16 +27,15 @@ LAYERWISE_OFFLOAD_COMPONENTS = frozenset(
 )
 LAYERWISE_OFFLOAD_SELECTORS = LAYERWISE_OFFLOAD_COMPONENTS | {ALL_COMPONENT, DEFAULT_COMPONENT}
 DEFAULT_LAYERWISE_OFFLOAD_COMPONENTS = frozenset({TEXT_ENCODER_COMPONENT, IMAGE_ENCODER_COMPONENT, VAE_COMPONENT})
-LEGACY_LAYERWISE_OFFLOAD_COMPONENTS = frozenset({DIT_COMPONENT})
 
 
-def parse_layerwise_offload_components(value: object) -> frozenset[str]:
+def parse_layerwise_offload_components(value: str | Collection[str] | None) -> frozenset[str]:
     """Normalize the public component selection into validated names."""
     if value is None:
-        return LEGACY_LAYERWISE_OFFLOAD_COMPONENTS
+        return LAYERWISE_OFFLOAD_COMPONENTS
     if isinstance(value, str):
         values = value.split(",")
-    elif isinstance(value, (list, tuple, set, frozenset)):
+    elif isinstance(value, Collection):
         values = list(value)
     else:
         raise TypeError(
@@ -54,7 +56,7 @@ def parse_layerwise_offload_components(value: object) -> frozenset[str]:
             f"{', '.join(sorted(LAYERWISE_OFFLOAD_SELECTORS))}"
         )
     if ALL_COMPONENT in components:
-        return frozenset({ALL_COMPONENT})
+        return LAYERWISE_OFFLOAD_COMPONENTS
     normalized = set(components)
     if DEFAULT_COMPONENT in normalized:
         normalized.remove(DEFAULT_COMPONENT)
@@ -73,7 +75,7 @@ def should_offload_component(od_config: OmniDiffusionConfig, component: str) -> 
     if not active:
         return False
     components = parse_layerwise_offload_components(getattr(od_config, "layerwise_offload_components", None))
-    return ALL_COMPONENT in components or component in components
+    return component in components
 
 
 class OffloadStrategy(Enum):
@@ -96,20 +98,31 @@ class OffloadConfig:
     dlo_use_allgather: bool = True
     dlo_resident_layers: int = 0  # leading DiT layers kept on device
     model_path: str | None = None  # checkpoint path for mmap weight loading
-    components: frozenset[str] = LEGACY_LAYERWISE_OFFLOAD_COMPONENTS
+    components: frozenset[str] = LAYERWISE_OFFLOAD_COMPONENTS
+
+    def __post_init__(self) -> None:
+        self.components = parse_layerwise_offload_components(self.components)
 
     def offloads(self, component: str) -> bool:
-        return ALL_COMPONENT in self.components or component in self.components
+        return component in self.components
 
-    def offloads_encoder(self, name: str) -> bool:
-        """Return whether the selector covers a discovered encoder path."""
-        if ALL_COMPONENT in self.components:
-            return True
+    def offloads_encoder(self, name: str, plan: OffloadPlan | None = None) -> bool:
+        """Return whether the selector covers a discovered encoder path.
+
+        Plans declare non-standard encoder names explicitly. The name-based
+        fallback preserves compatibility with pipelines that predate OffloadPlan.
+        """
+        declared_component = None if plan is None else plan.encoder_component_types.get(name)
+        if declared_component is not None:
+            if declared_component not in {TEXT_ENCODER_COMPONENT, IMAGE_ENCODER_COMPONENT}:
+                raise ValueError(f"OffloadPlan maps encoder {name!r} to unknown component {declared_component!r}")
+            return self.offloads(declared_component)
+
         leaf_name = name.rsplit(".", 1)[-1]
         if leaf_name.startswith(TEXT_ENCODER_COMPONENT) or leaf_name.endswith(TEXT_ENCODER_COMPONENT):
-            return TEXT_ENCODER_COMPONENT in self.components
+            return self.offloads(TEXT_ENCODER_COMPONENT)
         if leaf_name == IMAGE_ENCODER_COMPONENT:
-            return IMAGE_ENCODER_COMPONENT in self.components
+            return self.offloads(IMAGE_ENCODER_COMPONENT)
         return False
 
     @classmethod
@@ -185,9 +198,7 @@ class OffloadConfig:
             raise ValueError(
                 "layerwise_offload_components requires layerwise or distributed layerwise offload to be enabled"
             )
-        if strategy == OffloadStrategy.DISTRIBUTED_LAYERWISE and not (
-            ALL_COMPONENT in components or DIT_COMPONENT in components
-        ):
+        if strategy == OffloadStrategy.DISTRIBUTED_LAYERWISE and DIT_COMPONENT not in components:
             raise ValueError(
                 "Distributed layerwise offload requires the 'dit' component. "
                 "Use ordinary layerwise offload for encoder-only or VAE-only staging."

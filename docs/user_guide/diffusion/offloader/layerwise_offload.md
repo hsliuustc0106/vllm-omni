@@ -18,8 +18,10 @@ stream.
 | ... | ... | ... | ... |
 | last block | Prefetch block 0 | Compute last block | Free last block |
 
-Encoders, VAE modules, and non-block DiT modules such as embeddings and norms
-remain device resident.
+Selected, plan-declared encoder blocks can use the same rank-local streaming
+mechanism. Selected encoders or VAEs with a declared on-demand lifecycle are
+staged between pipeline phases. Undeclared auxiliary modules and non-block DiT
+modules remain device resident.
 
 ## Usage
 
@@ -37,6 +39,34 @@ vllm serve Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --omni --enable-layerwise-offload
 ```
 
+## Component selection
+
+Use `--layerwise-offload-components` with any comma-separated subset of
+`dit,text_encoder,image_encoder,vae`:
+
+- Omitting the option, or using `all`, selects all four categories. A category
+  is offloaded only when the model declares a safe block topology or on-demand
+  lifecycle; otherwise that module remains resident.
+- `default` selects `text_encoder,image_encoder,vae` and leaves the DiT
+  resident. It is valid for ordinary layerwise offload only.
+- An explicit subset such as `dit,text_encoder` controls only those categories.
+
+```bash
+# DiT-only behavior
+vllm serve /path/to/model --omni \
+  --enable-layerwise-offload \
+  --layerwise-offload-components dit
+
+# Stream a model-declared text encoder while keeping the DiT resident
+vllm serve /path/to/model --omni \
+  --enable-layerwise-offload \
+  --layerwise-offload-components text_encoder
+```
+
+Encoder categories are resolved from `OffloadPlan.encoder_component_types`
+first. A name-based fallback is retained for pipelines that predate
+`OffloadPlan`.
+
 ## Model integration
 
 Transformer classes declare containers of executable blocks:
@@ -53,9 +83,25 @@ class Flux2Transformer2DModel(nn.Module):
     ]
 ```
 
-See the [layerwise design](../../../design/feature/offloader/layerwise_offload.md) for
-the discovery and hook invariants. `OffloadPlan` is a separate declarative
-topology path for distributed layerwise offload.
+Auxiliary components use declarative pipeline metadata:
+
+```python
+from vllm_omni.diffusion.offloader import OffloadPlan
+
+
+class MyPipeline(nn.Module):
+    _encoder_modules = ["prompt_model"]
+    _vae_modules = ["vae"]
+    _offload_plan = OffloadPlan(
+        encoder_component_types={"prompt_model": "text_encoder"},
+        encoder_block_attrs={"prompt_model": ("encoder.layers",)},
+        on_demand_component_paths=frozenset({"vae"}),
+    )
+```
+
+See the [layerwise design](../../../design/feature/offloader/layerwise_offload.md)
+for the discovery and hook invariants. Both ordinary and distributed layerwise
+offload consume the same `OffloadPlan` metadata.
 
 ## Limitations
 

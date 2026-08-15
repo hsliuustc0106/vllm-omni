@@ -194,6 +194,10 @@ class Wan22I2VPipeline(
     _encoder_modules: ClassVar[list[str]] = ["text_encoder", "image_encoder"]
     _vae_modules: ClassVar[list[str]] = ["vae"]
     _offload_plan = OffloadPlan(
+        encoder_component_types={
+            "text_encoder": "text_encoder",
+            "image_encoder": "image_encoder",
+        },
         encoder_block_attrs={
             "text_encoder": ("encoder.block",),
             "image_encoder": ("vision_model.encoder.layers",),
