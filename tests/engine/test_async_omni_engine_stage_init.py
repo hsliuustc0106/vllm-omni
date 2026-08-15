@@ -399,6 +399,101 @@ def test_initialize_local_llm_replica_scopes_runtime_env(monkeypatch):
     assert os.environ[runtime_env_var] == "parent-value"
 
 
+def test_initialize_diffusion_stage_applies_client_batch_size_to_engine(monkeypatch):
+    import vllm_omni.diffusion.stage_diffusion_client as client_mod
+    import vllm_omni.engine.stage_init_utils as init_mod
+
+    od_config = types.SimpleNamespace(max_num_seqs=1)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(init_mod, "build_diffusion_config", lambda *args: od_config)
+
+    def _capture_client(model, config, metadata, stage_init_timeout, batch_size, use_inline):
+        captured.update(
+            model=model,
+            config=config,
+            metadata=metadata,
+            stage_init_timeout=stage_init_timeout,
+            batch_size=batch_size,
+            use_inline=use_inline,
+        )
+        return object()
+
+    monkeypatch.setattr(client_mod, "create_diffusion_client", _capture_client)
+    metadata = _make_diffusion_metadata(0)
+
+    init_mod.initialize_diffusion_stage(
+        0,
+        "dummy-model",
+        types.SimpleNamespace(),
+        metadata,
+        stage_init_timeout=12,
+        batch_size=4,
+        use_inline=True,
+    )
+
+    assert od_config.max_num_seqs == 4
+    assert captured == {
+        "model": "dummy-model",
+        "config": od_config,
+        "metadata": metadata,
+        "stage_init_timeout": 12,
+        "batch_size": 4,
+        "use_inline": True,
+    }
+
+
+def test_launch_diffusion_stage_replica_applies_batch_size_to_config(monkeypatch):
+    import vllm_omni.diffusion.stage_diffusion_client as client_mod
+    import vllm_omni.diffusion.stage_diffusion_proc as proc_mod
+    import vllm_omni.engine.stage_engine_startup as startup_mod
+
+    od_config = types.SimpleNamespace(max_num_seqs=1, parallel_config=types.SimpleNamespace(world_size=1))
+    monkeypatch.setattr(startup_mod, "build_diffusion_config", lambda *args: od_config)
+    monkeypatch.setattr(startup_mod, "acquire_device_locks", lambda *args: [])
+    monkeypatch.setattr(
+        startup_mod,
+        "register_stage_with_omni_master",
+        lambda **kwargs: types.SimpleNamespace(
+            handshake_address="tcp://127.0.0.1:26001",
+            input_address="tcp://127.0.0.1:26002",
+            output_address="tcp://127.0.0.1:26003",
+        ),
+    )
+
+    omni_master_server = types.SimpleNamespace(
+        address="127.0.0.1",
+        port=25000,
+        release_route_port_reservations=lambda *args, **kwargs: None,
+    )
+    proc_manager = types.SimpleNamespace(
+        addresses=types.SimpleNamespace(
+            inputs=["tcp://127.0.0.1:26002"],
+            outputs=["tcp://127.0.0.1:26003"],
+        )
+    )
+    monkeypatch.setattr(proc_mod, "StageDiffusionProcManager", lambda **kwargs: proc_manager)
+    sentinel_client = object()
+    monkeypatch.setattr(
+        client_mod.StageDiffusionClient,
+        "from_addresses",
+        lambda metadata, **kwargs: sentinel_client,
+    )
+
+    result, resources = startup_mod.launch_diffusion_stage_replica(
+        model="dummy-model",
+        stage_config=types.SimpleNamespace(),
+        metadata=types.SimpleNamespace(stage_id=0),
+        stage_init_timeout=12,
+        batch_size=4,
+        use_inline=False,
+        omni_master_server=omni_master_server,
+    )
+
+    assert result is sentinel_client
+    assert od_config.max_num_seqs == 4
+    assert resources.manager is proc_manager
+
+
 def test_stage_runtime_initializes_stage_pools(monkeypatch):
     import vllm_omni.engine.stage_runtime as runtime_mod
 
