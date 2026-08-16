@@ -6,7 +6,7 @@ import glob
 import os
 import re
 import time
-from collections.abc import Generator, Iterable
+from collections.abc import Generator, Iterable, Sequence
 from pathlib import Path
 from typing import cast
 
@@ -33,6 +33,11 @@ from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.hsdp import HSDPInferenceConfig, apply_hsdp_to_model
 from vllm_omni.diffusion.model_loader.checkpoint_adapters import (
     get_checkpoint_adapter,
+)
+from vllm_omni.diffusion.model_loader.host_weight_plan import (
+    HostWeightPlan,
+    build_checkpoint_mmap_plan,
+    has_online_quantization,
 )
 from vllm_omni.diffusion.models.diffusers_adapter.pipeline_diffusers_adapter import DiffusersAdapterPipeline
 from vllm_omni.diffusion.offloader.module_collector import ModuleDiscovery
@@ -135,6 +140,13 @@ class DiffusersPipelineLoader:
         self.od_config = od_config
         self.quant_config = od_config.quantization_config
         self.parallel_config = od_config.parallel_config
+        self.host_weight_plan: HostWeightPlan | None = None
+
+    def take_host_weight_plan(self) -> HostWeightPlan | None:
+        """Transfer the loader-produced plan to the offload backend."""
+        plan = self.host_weight_plan
+        self.host_weight_plan = None
+        return plan
 
     def _prepare_weights(
         self,
@@ -293,8 +305,10 @@ class DiffusersPipelineLoader:
     def get_all_weights(
         self,
         model: nn.Module,
+        sources: Sequence["ComponentSource"] | None = None,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
-        sources = self._get_weight_sources(model)
+        if sources is None:
+            sources = self._get_weight_sources(model)
         for source in sources:
             yield from self._get_weights_iterator(source, model=model)
 
@@ -386,6 +400,7 @@ class DiffusersPipelineLoader:
         device: torch.device | None = None,
     ) -> nn.Module:
         """Load a model with the given configurations."""
+        self.host_weight_plan = None
         if load_format is None:
             load_format = "default"
         # CPU offload + quantization: for offline-quantized models (e.g., AutoRound MXFP8),
@@ -417,22 +432,54 @@ class DiffusersPipelineLoader:
             else:
                 model = self._init_from_load_format(load_format, target_device, custom_pipeline_name, is_hsdp=False)
 
-                # Skip load_weights only for DLO+AllGather when the model
-                # supports mmap loading and no online quantization is active.
-                # This condition MUST match the gate in
-                # DistributedLayerwiseOffloadBackend.enable() so that the
-                # loader skips ⟺ enable() uses mmap.
-                from vllm_omni.diffusion.offloader.offload_plan import supports_mmap_loading
-
                 _dist_offload = getattr(self.od_config, "enable_distributed_layerwise_offload", False)
                 _use_ag = getattr(self.od_config, "dlo_use_allgather", True)
                 _has_online_quant = self._has_online_quant(model)
-                _supports_mmap = supports_mmap_loading(model)
+                _tp_size = int(getattr(self.parallel_config, "tensor_parallel_size", 1))
+                _use_hsdp = bool(getattr(self.parallel_config, "use_hsdp", False))
+                _dp_size = int(getattr(self.parallel_config, "data_parallel_size", 1))
+                _sp_size = int(getattr(self.parallel_config, "sequence_parallel_size", 1))
+                _dlo_group_size = _dp_size if _dp_size > 1 else _sp_size
 
-                _skip_load = _dist_offload and _use_ag and _supports_mmap and not _has_online_quant
+                plan_result = None
+                weight_sources = self._get_weight_sources(model)
+                if _dist_offload:
+                    modules = ModuleDiscovery.discover(model)
+                    plan_result = build_checkpoint_mmap_plan(
+                        model,
+                        dit_modules=tuple(zip(modules.dit_names, modules.dits)),
+                        sources=weight_sources,
+                        model_path=str(getattr(self.od_config, "model", "")) or None,
+                        tensor_parallel_size=_tp_size,
+                        use_hsdp=_use_hsdp,
+                        online_quantization=_has_online_quant,
+                    )
+                    self.host_weight_plan = plan_result.plan
+
+                _skip_load = self.host_weight_plan is not None
 
                 if _skip_load:
-                    logger.info("DLO+AllGather active: skipping load_weights (will load via mmap in enable())")
+                    logger.info(
+                        "DLO host-weight plan active (%s, %s): skipping ordinary materialization for %s",
+                        "AllGather" if _use_ag and _dlo_group_size > 1 else "rank-local",
+                        self.host_weight_plan.backing_kind,
+                        sorted(self.host_weight_plan.planned_source_prefixes) or "legacy DiT sources",
+                    )
+                    ordinary_sources = tuple(
+                        source
+                        for source in weight_sources
+                        if source.prefix not in self.host_weight_plan.planned_source_prefixes
+                    )
+                    if ordinary_sources:
+                        logger.info(
+                            "Loading %d component weight source(s) outside the DLO host-weight plan",
+                            len(ordinary_sources),
+                        )
+                        self.load_weights(
+                            model,
+                            sources=ordinary_sources,
+                            planned_weights=self.host_weight_plan.bindings,
+                        )
                 else:
                     if _dist_offload and _use_ag and _has_online_quant:
                         raise ValueError(
@@ -442,9 +489,10 @@ class DiffusersPipelineLoader:
                             "Please use --dlo-no-use-allgather or disable online "
                             "quantization."
                         )
-                    if _dist_offload and _use_ag and not _supports_mmap:
+                    if _dist_offload and plan_result is not None:
                         logger.info(
-                            "DLO+AllGather active but model does not support mmap: loading weights via regular loader."
+                            "DLO direct checkpoint mmap unavailable; using ordinary loader: %s",
+                            plan_result.fallback_reason,
                         )
                     logger.debug("Loading weights on %s ...", load_device)
                     if offload_after_quant:
@@ -498,11 +546,7 @@ class DiffusersPipelineLoader:
         """Whether any layer uses an online-quant method that defers weight
         materialization onto the ``meta`` device (upstream vLLM
         ``uses_meta_device=True``, e.g. online FP8)."""
-        for module in model.modules():
-            quant_method = getattr(module, "quant_method", None)
-            if getattr(quant_method, "uses_meta_device", False):
-                return True
-        return False
+        return has_online_quantization(model)
 
     def _apply_skip_softmax_calibration(self, model: nn.Module) -> None:
         from vllm_omni.diffusion.attention.backends.trtllm_calibration import (
@@ -605,12 +649,16 @@ class DiffusersPipelineLoader:
         model: nn.Module,
         *,
         stream_online_quant_to_cpu: bool = False,
+        sources: Sequence["ComponentSource"] | None = None,
+        planned_weights: Iterable[str] = (),
     ) -> None:
         weights_to_load = self._get_expected_parameter_names(model)
-        weights = self.get_all_weights(model)
+        weights = self.get_all_weights(model) if sources is None else self.get_all_weights(model, sources=sources)
         if stream_online_quant_to_cpu:
             weights = self._stream_online_quant_weights_to_cpu(model, weights)
         loaded_weights = model.load_weights(weights)
+        if loaded_weights is not None:
+            loaded_weights = set(loaded_weights).union(planned_weights)
 
         self.counter_after_loading_weights = time.perf_counter()
         logger.info_once(

@@ -3,7 +3,9 @@
 Distributed layerwise offloading (DLO) extends block streaming to multi-device
 deployments. With AllGather enabled, each rank stores roughly `1 / dp_size` of
 the host weights and reconstructs each layer at runtime. Without AllGather,
-each rank streams its standard-loader rank-local weights independently.
+each rank streams a complete block independently. Compatible TP1 deployments
+can share checkpoint-backed host pages among processes on the same node;
+otherwise DLO streams the ordinary loader's rank-local tensors.
 
 See the [DLO feature design](../../../design/feature/offloader/distributed_layerwise_offload.md)
 for the implementation contract and compatibility matrix.
@@ -59,21 +61,48 @@ omni = Omni(
 | `--enable-distributed-layerwise-offload` | Enable DLO | `false` |
 | `--data-parallel-size N` | DP ranks and AllGather weight-sharding group | `1` |
 | `--dlo-use-allgather` | Shard host weights and reconstruct with AllGather | `true` |
-| `--dlo-no-use-allgather` | Keep standard-loader rank-local weights | `false` |
+| `--dlo-no-use-allgather` | Stream complete rank-local blocks without a DLO weight collective | `false` |
 | `--dlo-resident-layers N` | Keep N leading main-DiT blocks on device; requires no-AllGather and model-declared resident paths | `0` |
 
-## mmap weight loading
+## Host-weight loading
 
-The DLO plus AllGather path:
+The diffusion loader chooses host storage before DLO is enabled. It first
+attempts to build a complete, validated direct-checkpoint mmap plan. If names,
+coverage, shape, dtype, topology, or loader-callback compatibility cannot be
+proven, it runs the ordinary model loader instead. DLO consumes that result and
+does not make a second checkpoint-compatibility decision.
+
+The shared-mmap optimization in this phase is supported only with TP1. TP
+greater than one falls back before model mutation to ordinary TP-aware loading.
+DLO may still consume those TP-local tensors, but this is a compatibility path:
+it does not share checkpoint-backed runtime weights across DP replicas and
+provides no shared-mmap host-memory guarantee.
+
+The mmap plan skips only dedicated DiT weight sources. Other component sources,
+such as a text encoder loaded through the shared diffusion loader, continue to
+use their ordinary component loader. A checkpoint source that mixes DiT and
+non-DiT weights falls back completely rather than leaving an unplanned
+component uninitialized.
+
+With direct checkpoint mmap, the loader:
 
 1. saves non-persistent buffers such as RoPE frequencies;
 2. moves the normally created transformer to the meta device;
 3. loads checkpoint tensors as mmap views backed by the shared OS page cache;
-4. calls model-specific `post_load_weights()` conversions; and
-5. restores the saved non-persistent buffers.
+4. applies any loader-owned bounded layout adapters while packing blocks;
+5. restores saved non-persistent buffers; and
+6. preserves `post_load_weights()` and `validate_loaded_weights()` lifecycle
+   hooks.
 
-This avoids one full checkpoint RSS copy per rank and does not require
-model-specific loading code.
+For AllGather with a group larger than one, each process copies only its
+persistent shard and then releases the source mapping. For no-AllGather, each
+process keeps the mapping open and packs complete blocks through two bounded
+pinned staging slots. Processes mapping the same files on one node share the
+immutable pages; no-AllGather still performs a complete-block H2D copy in each
+process.
+
+When the effective DLO group size is one, `dlo_use_allgather=True` does not
+perform a collective and uses the same rank-local transfer behavior.
 
 ## Declarative topology
 
@@ -103,16 +132,22 @@ must enter each collective.
 
 ## Limitations
 
-- Online FP8 quantization is rejected with the DLO plus AllGather mmap path.
-  Use `--dlo-no-use-allgather` or disable online quantization.
-- Tensor parallel size greater than one is rejected in the mmap path because
-  it bypasses TP-aware loader callbacks. The no-AllGather path retains the
-  standard loader and remains experimental with TP.
+- Direct checkpoint mmap currently requires TP1. TP greater than one is
+  outside the Phase A shared-mmap support scope and falls back before model
+  mutation to the ordinary TP-aware loader. DLO can stream that runtime layout,
+  but it provides no shared-mmap host-memory benefit or guarantee.
 - HSDP plus AllGather is rejected to avoid double sharding. HSDP without
   AllGather has limited end-to-end validation.
+- Online quantization uses the ordinary loader with no-AllGather. It remains
+  incompatible with DLO AllGather.
 - Resident leading layers require `--dlo-no-use-allgather` and a model
   `OffloadPlan` that declares eligible `resident_dit_paths`.
 - DP concurrency requires an explicit, identical inference-step count.
+
+Sharing transformed TP or quantized runtime layouts through a normalized mmap
+cache is a follow-up design in
+[RFC #6195](https://github.com/vllm-project/vllm-omni/issues/6195), not part of
+the direct-checkpoint path.
 
 See the [Cosmos3 DistOffload recipe](https://github.com/vllm-project/vllm-omni/blob/main/recipes/cosmos3/Cosmos3-DistOffload.md)
 for an end-to-end example.

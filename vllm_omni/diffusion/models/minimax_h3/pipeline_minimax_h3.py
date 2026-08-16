@@ -540,13 +540,6 @@ class MiniMaxH3Pipeline(
         encoder_block_attrs={"text_encoder": ("vision.blocks", "text_model.layers")},
         on_demand_component_paths=frozenset({"text_encoder", "video_vae", "audio_vae"}),
     )
-    # H3's regular loader performs checkpoint-layout conversions (grouped QKV
-    # and fused MLP). Keep it on that path until mmap can run the same loader
-    # callbacks for every affected parameter.
-    _supports_mmap_loading: ClassVar[bool] = False
-    # TODO(offload): Re-enable after the generic rank-local mmap path can run
-    # this model's grouped-QKV reorder and fused-MLP packing before TP sharding.
-    # Do not bypass the regular loader until that equivalence is tested.
     _PROFILER_TARGETS: ClassVar[list[str]] = [
         "_prepare_reference_videos",
         "encode_prompt",
