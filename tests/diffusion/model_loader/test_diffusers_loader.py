@@ -93,7 +93,7 @@ def _make_loader_with_weights(weight_names: list[str]) -> DiffusersPipelineLoade
 
 def _make_dlo_online_quant_config() -> OmniDiffusionConfig:
     return OmniDiffusionConfig(
-        model="unused",
+        model="",
         dtype=torch.float32,
         quantization_config="fp8",
         parallel_config=DiffusionParallelConfig(data_parallel_size=2),
