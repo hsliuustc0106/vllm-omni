@@ -181,8 +181,11 @@ requirements.
 
 Direct checkpoint mmap can back either transfer path. It is currently limited
 to proven TP1, non-HSDP, non-online-quantized layouts. Other layouts use the
-ordinary loader. Online quantization remains incompatible with DLO AllGather;
-use `--dlo-no-use-allgather` or disable online quantization.
+ordinary loader. Per-tensor online FP8 linears can use DLO AllGather after the
+ordinary loader finalizes their runtime weights and scales; DLO then shards and
+reconstructs those tensors with their recorded layouts. Other online methods
+must use `--dlo-no-use-allgather` or disable online quantization until their
+runtime layouts are validated.
 
 A normalized runtime mmap cache, built through the ordinary loader, is the
 proposed general mechanism for sharing transformed TP or quantized layouts.
@@ -197,6 +200,8 @@ Current source-level validation includes:
 - HSDP + DLO without AllGather acceptance at configuration level;
 - loader preflight fallback for TP, HSDP, online quantization, unknown custom
   loaders, missing keys, and shape/dtype mismatches;
+- ordinary-loader fallback for per-tensor online FP8 linears followed by DLO
+  sharding of finalized weights and scales;
 - exact loader-to-backend plan transfer and ordinary-loader fallback;
 - rank-local mmap source retention, bounded two-slot staging, and adapter
   transforms without parameter-side flags;
