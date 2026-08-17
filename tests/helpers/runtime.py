@@ -38,11 +38,13 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 
 from tests.helpers.assertions import (
+    SuccessRateGate,
     assert_audio_speech_response,
     assert_diffusion_response,
     assert_http_error,
     assert_images_generations_response,
     assert_omni_response,
+    collect_at_success_rate,
 )
 from tests.helpers.env import run_post_test_cleanup, run_pre_test_cleanup
 from tests.helpers.media import (
@@ -1891,8 +1893,20 @@ class OpenAIClientHandler:
             )
         ]
 
-    def send_omni_request(self, request_config: dict[str, Any], request_num: int = 1) -> list[OmniResponse]:
-        """Chat completions via the OpenAI Python SDK (not raw HTTP)."""
+    def send_omni_request(
+        self,
+        request_config: dict[str, Any],
+        request_num: int = 1,
+        *,
+        min_successes: int | None = None,
+        max_concurrency: int | None = None,
+    ) -> list[OmniResponse]:
+        """Chat completions via the OpenAI Python SDK (not raw HTTP).
+
+        ``min_successes`` gates the batch on how many of the ``request_num`` requests pass
+        rather than requiring each one to, and returns only the successes; ``max_concurrency``
+        caps how many are in flight at once. See ``SuccessRateGate``.
+        """
         responses: list[OmniResponse] = []
         stream = request_config.get("stream", False)
         modalities = request_config.get("modalities", ["text", "audio"])
@@ -1923,22 +1937,6 @@ class OpenAIClientHandler:
         if extra_body:
             create_kwargs["extra_body"] = extra_body
 
-        if request_num == 1:
-            wall_start = time.perf_counter()
-            chat_completion = self.client.chat.completions.create(**create_kwargs)
-            resp = (
-                self._process_stream_omni_response(chat_completion, wall_start=wall_start)
-                if stream
-                else self._process_non_stream_omni_response(chat_completion, wall_start=wall_start)
-            )
-            assert_omni_response(resp, request_config, run_level=self.run_level)
-            if resp.e2e_latency is not None:
-                self._print_client_stat(f"[omni] request#1 success in {resp.e2e_latency:.3f}s")
-            else:
-                self._print_client_stat("[omni] request#1 completed")
-            responses.append(resp)
-            return responses
-
         def _one():
             wall_start = time.perf_counter()
             chat_completion = self.client.chat.completions.create(**create_kwargs)
@@ -1947,6 +1945,33 @@ class OpenAIClientHandler:
                 if stream
                 else self._process_non_stream_omni_response(chat_completion, wall_start=wall_start)
             )
+
+        if min_successes is not None:
+            gate = SuccessRateGate(min_successes=min_successes, concurrency=max_concurrency)
+
+            def _sample() -> OmniResponse:
+                resp = _one()
+                assert_omni_response(resp, request_config, run_level=self.run_level)
+                return resp
+
+            # Not _print_client_stat: the count is the gate's verdict, so it has to survive
+            # log_stats=False.
+            return collect_at_success_rate(
+                _sample,
+                gate,
+                request_num=request_num,
+                report=lambda line: print(f"[omni] {line}", flush=True),
+            )
+
+        if request_num == 1:
+            resp = _one()
+            assert_omni_response(resp, request_config, run_level=self.run_level)
+            if resp.e2e_latency is not None:
+                self._print_client_stat(f"[omni] request#1 success in {resp.e2e_latency:.3f}s")
+            else:
+                self._print_client_stat("[omni] request#1 completed")
+            responses.append(resp)
+            return responses
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=request_num) as executor:
             futures = {executor.submit(_one): i + 1 for i in range(request_num)}
