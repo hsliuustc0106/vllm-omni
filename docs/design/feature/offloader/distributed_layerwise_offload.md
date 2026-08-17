@@ -10,6 +10,30 @@ For user-facing commands, see the
 [distributed layerwise offloading guide](../../../user_guide/diffusion/offloader/distributed_layerwise_offload.md)
 and the [Cosmos3 recipe](https://github.com/vllm-project/vllm-omni/blob/main/recipes/cosmos3/Cosmos3-DistOffload.md).
 
+## Feature compatibility
+
+Host-storage optimization and runtime compatibility are separate decisions.
+When direct checkpoint mmap is unavailable, DLO can still use tensors produced
+by the ordinary loader. "Compatibility path" below means that fallback is
+implemented but has less end-to-end coverage than the primary path.
+
+Legend: ✅ supported, ⚠️ compatibility path or limited validation, ❌ unsupported.
+
+| Feature | DLO + AllGather | DLO without AllGather |
+|---|---|---|
+| **DP** | ✅ Primary path; host weights are sharded across the DP group. | ✅ Each DP rank streams complete rank-local blocks. |
+| **SP** | ✅ When DP=1, DLO uses the SP group for weight sharding. | ✅ SP remains active without a DLO weight collective. |
+| **TP > 1** | ⚠️ Ordinary TP-aware loader only; no direct checkpoint mmap. | ⚠️ Ordinary TP-aware loader only; no direct checkpoint mmap. |
+| **HSDP** | ❌ Rejected to avoid double-sharding parameters. | ⚠️ Limited end-to-end coverage. |
+| **Per-tensor online FP8 linears** | ✅ Ordinary loader finalizes weights and scales before DLO sharding. | ✅ Ordinary loader retains complete rank-local tensors. |
+| **Other online quantization methods** | ❌ Rejected until runtime packing and scale layouts are validated. | ⚠️ Allowed through the ordinary loader; validation is method-specific. |
+| **Model-level or standard layerwise CPU offload** | ❌ Disabled because DLO takes priority. | ❌ Disabled because DLO takes priority. |
+| **Resident leading layers** | ❌ Rejected. | ✅ Requires eligible resident paths in the model's `OffloadPlan`. |
+
+See [Parallelism compatibility](#parallelism-compatibility) and
+[Request and loading constraints](#request-and-loading-constraints) for the
+detailed contracts and validation boundaries.
+
 ## Status
 
 DLO is implemented for multi-device diffusion execution. The default
