@@ -417,9 +417,18 @@ def test_dlo_allgather_online_fp8_uses_ordinary_loader(monkeypatch):
     model = nn.Module()
     model.transformer = nn.Linear(2, 2, bias=False)
     model.transformer.quant_method = object.__new__(Fp8PerTensorOnlineLinearMethod)
+    model.transformer.quant_method.uses_meta_device = True
     calls: list[object] = []
+    allowlist_models: list[nn.Module] = []
+
+    original_allowlist_check = loader._unsupported_dlo_allgather_online_quant_methods
+
+    def check_allowlist(candidate: nn.Module) -> tuple[str, ...]:
+        allowlist_models.append(candidate)
+        return original_allowlist_check(candidate)
 
     loader._init_from_load_format = lambda *_args, **_kwargs: model  # type: ignore[method-assign]
+    monkeypatch.setattr(loader, "_unsupported_dlo_allgather_online_quant_methods", check_allowlist)
     loader._request_offload_after_quant = lambda _model: 1  # type: ignore[method-assign]
     loader.load_weights = (  # type: ignore[method-assign]
         lambda _model, *, stream_online_quant_to_cpu=False: calls.append(("load", stream_online_quant_to_cpu))
@@ -436,6 +445,7 @@ def test_dlo_allgather_online_fp8_uses_ordinary_loader(monkeypatch):
     )
 
     assert loader.load_model(load_device="cpu", device=torch.device("cpu")) is model
+    assert allowlist_models == [model]
     assert calls == [("load", True), "process"]
     assert loader.take_host_weight_plan() is None
 
