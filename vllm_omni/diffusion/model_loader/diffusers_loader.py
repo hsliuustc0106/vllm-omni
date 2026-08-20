@@ -6,9 +6,9 @@ import glob
 import os
 import re
 import time
-from collections.abc import Generator, Iterable, Sequence
+from collections.abc import Generator, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch import nn
@@ -42,6 +42,12 @@ from vllm_omni.diffusion.model_loader.host_weight_plan import (
 from vllm_omni.diffusion.models.diffusers_adapter.pipeline_diffusers_adapter import DiffusersAdapterPipeline
 from vllm_omni.diffusion.offloader.module_collector import ModuleDiscovery
 from vllm_omni.diffusion.registry import initialize_model
+
+if TYPE_CHECKING:
+    from vllm_omni.diffusion.host_weight.ownership import WeightConsumerOwner
+    from vllm_omni.diffusion.offloader.weight_consumer import (
+        BuiltinOffloadWeightConsumerFactory,
+    )
 
 
 # download_gguf was removed from upstream vLLM (commit 6635279d8).
@@ -77,6 +83,37 @@ def download_gguf(
 
 
 logger = init_logger(__name__)
+
+
+def _report_cleanup_failure(
+    primary_error: BaseException,
+    action: str,
+    cleanup_error: BaseException,
+) -> None:
+    """Report cleanup failure without replacing the primary exception."""
+
+    try:
+        note = f"{action} also failed: {type(cleanup_error).__name__}: {cleanup_error}"
+    except BaseException:
+        note = f"{action} also failed"
+    try:
+        primary_error.add_note(note)
+    except BaseException:
+        pass
+    try:
+        logger.error(
+            "%s while handling %s",
+            note,
+            type(primary_error).__name__,
+            exc_info=(
+                type(cleanup_error),
+                cleanup_error,
+                cleanup_error.__traceback__,
+            ),
+        )
+    except BaseException:
+        # Failure reporting is part of cleanup and must remain non-throwing.
+        pass
 
 
 def _natural_sort_key(filepath: str) -> list:
@@ -135,18 +172,38 @@ class DiffusersPipelineLoader:
     counter_before_loading_weights: float = 0.0
     counter_after_loading_weights: float = 0.0
 
-    def __init__(self, load_config: LoadConfig, od_config: OmniDiffusionConfig):
+    def __init__(
+        self,
+        load_config: LoadConfig,
+        od_config: OmniDiffusionConfig,
+        *,
+        weight_consumer_owner: "WeightConsumerOwner | None" = None,
+        weight_consumer_factory: "BuiltinOffloadWeightConsumerFactory | None" = None,
+    ):
+        if (weight_consumer_owner is None) != (weight_consumer_factory is None):
+            raise ValueError("weight_consumer_owner and weight_consumer_factory must be provided together")
         self.load_config = load_config
         self.od_config = od_config
         self.quant_config = od_config.quantization_config
         self.parallel_config = od_config.parallel_config
+        self.weight_consumer_owner = weight_consumer_owner
+        self.weight_consumer_factory = weight_consumer_factory
         self.host_weight_plan: HostWeightPlan | None = None
+        self.host_weight_runtime_fell_back = False
+        self.host_weight_runtime_evidence: dict[str, object] | None = None
 
     def take_host_weight_plan(self) -> HostWeightPlan | None:
         """Transfer the loader-produced plan to the offload backend."""
         plan = self.host_weight_plan
         self.host_weight_plan = None
         return plan
+
+    def take_host_weight_runtime_evidence(self) -> dict[str, object] | None:
+        """Transfer process-local resolution evidence to the model runner."""
+
+        evidence = self.host_weight_runtime_evidence
+        self.host_weight_runtime_evidence = None
+        return evidence
 
     def _prepare_weights(
         self,
@@ -244,6 +301,8 @@ class DiffusersPipelineLoader:
         model: nn.Module | None = None,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
+        if os.environ.get("VLLM_OMNI_HWR_POISON_TRANSFORMER_LOAD") == "1" and source.prefix == "transformer.":
+            raise RuntimeError("transformer ComponentSource iteration is poisoned for HWR warm-hit verification")
         _, hf_weights_files, use_safetensors = self._prepare_weights(
             source.model_or_path,
             source.subfolder,
@@ -401,35 +460,117 @@ class DiffusersPipelineLoader:
     ) -> nn.Module:
         """Load a model with the given configurations."""
         self.host_weight_plan = None
+        self.host_weight_runtime_fell_back = False
+        self.host_weight_runtime_evidence = None
         if load_format is None:
             load_format = "default"
-        # CPU offload + quantization: for offline-quantized models (e.g., AutoRound MXFP8),
-        # weights are already quantized in the checkpoint — load directly on CPU.
-        # For online quantization, load on device so quantization can run on accelerator,
-        # then move back to CPU afterward.
-        offload_after_quant = False
+        hwr_requested = (
+            str(
+                getattr(
+                    self.od_config,
+                    "host_weight_runtime_mode",
+                    "disabled",
+                )
+            )
+            != "disabled"
+        )
+        # Compute the ordinary-loader route even when HWR is requested.  A
+        # pre-commit HWR fallback must be observationally equivalent to HWR
+        # being disabled, including accelerator-side online quantization.
+        ordinary_load_device = load_device
+        ordinary_offload_after_quant = False
         if load_device == "cpu" and self.quant_config is not None and device is not None:
             quant_cfg = self.quant_config
             is_offline = getattr(quant_cfg, "data_type", None) == "mx_fp" or getattr(
                 quant_cfg, "is_checkpoint_quantized", False
             )
             if not is_offline:
-                load_device = device.type
-                offload_after_quant = True
+                ordinary_load_device = device.type
+                ordinary_offload_after_quant = True
+
+        if hwr_requested:
+            # The HWR consumer is a meta/CPU skeleton.  Only an elected,
+            # isolated producer performs online quantization on ``device``.
+            offload_after_quant = False
+        else:
+            load_device = ordinary_load_device
+            offload_after_quant = ordinary_offload_after_quant
+            if offload_after_quant:
                 logger.info(
                     "Online quantization with CPU offload, using %s for weight loading (will offload back to CPU)",
                     load_device,
                 )
-            else:
+            elif load_device == "cpu" and self.quant_config is not None:
                 logger.info("Offline-quantized model with CPU offload, loading weights directly on CPU")
 
         target_device = torch.device(load_device)
         with set_default_torch_dtype(self.od_config.dtype):
-            if self.parallel_config.use_hsdp:
+            hwr_enabled = hwr_requested
+            if hwr_enabled:
+                from vllm_omni.diffusion.host_weight.session_factory import (
+                    WeightAccessPreparationFallback,
+                )
+
+                if load_format != "default":
+                    raise ValueError("Host Weight Runtime v1 requires load_format='default'")
+                if device is None:
+                    raise ValueError(
+                        "Host Weight Runtime requires the accelerator device used by the elected FP8 producer"
+                    )
+                if self.weight_consumer_owner is None or self.weight_consumer_factory is None:
+                    raise RuntimeError(
+                        "Host Weight Runtime requires a preinstalled WeightConsumerOwner "
+                        "and BuiltinOffloadWeightConsumerFactory"
+                    )
+                try:
+                    model = self._load_model_with_host_weight_runtime(
+                        target_device=target_device,
+                        producer_device=device,
+                        offload_after_quant=offload_after_quant,
+                    )
+                except WeightAccessPreparationFallback as fallback_error:
+                    if bool(
+                        getattr(
+                            self.od_config,
+                            "host_weight_runtime_required",
+                            False,
+                        )
+                    ):
+                        raise
+                    # The composition-owned owner remains the sole cleanup
+                    # authority.  Optional legacy loading may start only after
+                    # it has completed any retained preparation cleanup.
+                    owner = self.weight_consumer_owner
+                    assert owner is not None
+                    try:
+                        owner.close()
+                    except BaseException as cleanup_error:
+                        _report_cleanup_failure(
+                            fallback_error,
+                            "HWR owner cleanup before ordinary-loader fallback",
+                            cleanup_error,
+                        )
+                        raise fallback_error
+                    logger.warning(
+                        "Host Weight Runtime could not resolve a usable artifact; falling back before consumer binding"
+                    )
+                    self.host_weight_runtime_fell_back = True
+                    hwr_enabled = False
+                    load_device = ordinary_load_device
+                    offload_after_quant = ordinary_offload_after_quant
+                    target_device = torch.device(load_device)
+                    if offload_after_quant:
+                        logger.info(
+                            "HWR fallback restored ordinary online quantization on "
+                            "%s before offloading finalized weights to CPU",
+                            load_device,
+                        )
+
+            if not hwr_enabled and self.parallel_config.use_hsdp:
                 model = self._load_model_with_hsdp(
                     target_device=device, load_format=load_format, custom_pipeline_name=custom_pipeline_name
                 )
-            else:
+            elif not hwr_enabled:
                 model = self._init_from_load_format(load_format, target_device, custom_pipeline_name, is_hsdp=False)
 
                 _dist_offload = getattr(self.od_config, "enable_distributed_layerwise_offload", False)
@@ -440,10 +581,11 @@ class DiffusersPipelineLoader:
                 _dp_size = int(getattr(self.parallel_config, "data_parallel_size", 1))
                 _sp_size = int(getattr(self.parallel_config, "sequence_parallel_size", 1))
                 _dlo_group_size = _dp_size if _dp_size > 1 else _sp_size
+                _host_weight_runtime_enabled = hwr_enabled
 
                 plan_result = None
                 weight_sources = self._get_weight_sources(model)
-                if _dist_offload:
+                if _dist_offload and not _host_weight_runtime_enabled:
                     modules = ModuleDiscovery.discover(model)
                     plan_result = build_checkpoint_mmap_plan(
                         model,
@@ -455,6 +597,11 @@ class DiffusersPipelineLoader:
                         online_quantization=_has_online_quant,
                     )
                     self.host_weight_plan = plan_result.plan
+                elif _dist_offload:
+                    logger.info(
+                        "Host Weight Runtime is enabled: using the ordinary trusted "
+                        "loader to produce finalized runtime tensors before publication"
+                    )
 
                 _skip_load = self.host_weight_plan is not None
 
@@ -522,6 +669,171 @@ class DiffusersPipelineLoader:
 
         self._apply_skip_softmax_calibration(model)
         return model.eval()
+
+    def _load_model_with_host_weight_runtime(
+        self,
+        *,
+        target_device: torch.device,
+        producer_device: torch.device,
+        offload_after_quant: bool,
+    ) -> nn.Module:
+        """Resolve/bind the transformer before any transformer source load."""
+        from vllm_omni.diffusion.host_weight.evidence import (
+            HostWeightResolutionEvidence,
+            preparation_failure_evidence,
+        )
+        from vllm_omni.diffusion.host_weight.ownership import (
+            FatalPreparationFailure,
+            PreparedSessionReady,
+            RetryablePreparationFailure,
+            UseLegacy,
+        )
+        from vllm_omni.diffusion.host_weight.session_factory import (
+            WeightAccessPreparationError,
+            WeightAccessPreparationFallback,
+            WeightAccessSessionFactory,
+        )
+
+        owner = self.weight_consumer_owner
+        consumer_factory = self.weight_consumer_factory
+        if owner is None or consumer_factory is None:
+            raise RuntimeError(
+                "Host Weight Runtime requires a preinstalled WeightConsumerOwner "
+                "and BuiltinOffloadWeightConsumerFactory"
+            )
+
+        factory = WeightAccessSessionFactory(
+            od_config=self.od_config,
+            load_config=self.load_config,
+            producer_device=producer_device,
+        )
+
+        def build_pipeline(transformer: nn.Module) -> nn.Module:
+            return self._init_from_load_format(
+                "default",
+                target_device,
+                model_init_kwargs={"transformer_override": transformer},
+            )
+
+        factory.prepare_into(
+            owner=owner,
+            consumer_requirements_factory=consumer_factory.requirements,
+            pipeline_builder=build_pipeline,
+        )
+        result = owner.preparation_result
+
+        resolution_evidence = getattr(factory, "resolution_evidence", None)
+
+        def record_failure_evidence(
+            error: BaseException,
+            *,
+            outcome: str,
+            code: str,
+            detail: str,
+        ) -> None:
+            evidence = resolution_evidence
+            if evidence is None:
+                if outcome in {"fallback", "fatal"}:
+                    evidence = preparation_failure_evidence(
+                        error,
+                        runtime_mode=str(self.od_config.host_weight_runtime_mode),
+                        fallback=outcome == "fallback",
+                    )
+                else:
+                    evidence = HostWeightResolutionEvidence(
+                        runtime_mode=str(self.od_config.host_weight_runtime_mode),
+                        outcome=outcome,
+                        events=(outcome,),
+                        code=code,
+                        detail=detail,
+                    )
+            self.host_weight_runtime_evidence = evidence.to_dict()
+
+        if isinstance(result, UseLegacy):
+            required = bool(
+                getattr(
+                    self.od_config,
+                    "host_weight_runtime_required",
+                    False,
+                )
+            )
+            if required:
+                error = WeightAccessPreparationError(
+                    result.detail,
+                    code=result.reason.value,
+                )
+            else:
+                error = WeightAccessPreparationFallback(
+                    result.detail,
+                    code=result.reason.value,
+                    legacy_reason=result.reason,
+                )
+            record_failure_evidence(
+                error,
+                outcome="fatal" if required else "fallback",
+                code=result.reason.value,
+                detail=result.detail,
+            )
+            raise error
+        if isinstance(result, RetryablePreparationFailure):
+            # Retry is a distinct composition outcome, not permission for one
+            # worker to start the ordinary loader.  V1 has no all-rank retry /
+            # fallback coordinator at this boundary, so report it fail-closed.
+            error = WeightAccessPreparationError(result.detail, code=result.code)
+            record_failure_evidence(
+                error,
+                outcome="retryable_failure",
+                code=result.code,
+                detail=result.detail,
+            )
+            raise error
+        if isinstance(result, FatalPreparationFailure):
+            error = WeightAccessPreparationError(result.detail, code=result.code)
+            record_failure_evidence(
+                error,
+                outcome="fatal",
+                code=result.code,
+                detail=result.detail,
+            )
+            raise error
+        if not isinstance(result, PreparedSessionReady):
+            raise TypeError(f"unknown HWR preparation result {type(result).__name__}")
+
+        prepared = result.prepared_session
+        model = cast(nn.Module, prepared.pipeline)
+        if resolution_evidence is not None:
+            self.host_weight_runtime_evidence = resolution_evidence.to_dict()
+        manifest = factory.manifest
+        if manifest is None:
+            raise RuntimeError("HWR session factory returned no artifact manifest")
+        artifact_ids = tuple(f"transformer.{tensor.tensor_id}" for tensor in manifest.tensors)
+        ordinary_sources = tuple(
+            source for source in self._get_weight_sources(model) if source.prefix != "transformer."
+        )
+        if not ordinary_sources:
+            logger.info("HWR warm path has no non-transformer component sources to load")
+        else:
+            logger.info(
+                "HWR resolved transformer before ordinary loading; loading %d non-artifact component source(s)",
+                len(ordinary_sources),
+            )
+            if offload_after_quant:
+                marked = self._request_offload_after_quant(model)
+                if marked:
+                    logger.info(
+                        "Online quantization will return each of %d remaining layers to CPU as it is quantized",
+                        marked,
+                    )
+            self.load_weights(
+                model,
+                sources=ordinary_sources,
+                stream_online_quant_to_cpu=offload_after_quant,
+                planned_weights=artifact_ids,
+            )
+            self._process_weights_after_loading(model, target_device)
+        if offload_after_quant:
+            model.to("cpu")
+        return model
 
     @staticmethod
     def _request_offload_after_quant(model: nn.Module) -> int:
@@ -768,8 +1080,11 @@ class DiffusersPipelineLoader:
         target_device: torch.device,
         custom_pipeline_name: str | type[nn.Module] | None = None,
         is_hsdp: bool = False,
+        model_init_kwargs: Mapping[str, object] | None = None,
     ) -> nn.Module:
         """Initialize the model from a specified load format."""
+        if model_init_kwargs and load_format != "default":
+            raise ValueError("model construction overrides are supported only with load_format='default'")
         if load_format == "custom_pipeline":
             # NOTE: Custom pipelines call HuggingFace `from_pretrained(...).to(device)`
             # internally. If we construct them under `with target_device:` (CUDA),
@@ -799,7 +1114,10 @@ class DiffusersPipelineLoader:
             device_ctx = contextlib.nullcontext() if hsdp_defer_to_cpu else target_device
             with device_ctx:
                 if load_format == "default":
-                    model = initialize_model(self.od_config)
+                    model = initialize_model(
+                        self.od_config,
+                        model_init_kwargs=model_init_kwargs,
+                    )
                 elif load_format == "diffusers":
                     model = DiffusersAdapterPipeline(od_config=self.od_config, device=target_device)
                 else:

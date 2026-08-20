@@ -55,6 +55,17 @@ def _nonneg_finite_float(value: str) -> float:
     return parsed
 
 
+def _positive_finite_float(value: str) -> float:
+    """Argparse type for finite, positive floats (rejects zero/nan/inf)."""
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid float value: {value!r}") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be a finite positive number, got {value!r}")
+    return parsed
+
+
 def _ensure_vllm_platform():
     """Ensure vLLM's current_platform is valid before arg parsing.
 
@@ -728,6 +739,34 @@ class OmniServeCommand(CLISubcommand):
             default=0,
             help="Keep this many leading main-DiT blocks resident on the device "
             "while distributed layerwise offload streams the remaining blocks.",
+        )
+        omni_config_group.add_argument(
+            "--host-weight-runtime-mode",
+            choices=("disabled", "read_only", "read_write"),
+            default="disabled",
+            help=(
+                "Enable the node-local Host Weight Runtime. read_only consumes "
+                "verified artifacts; read_write may also publish them."
+            ),
+        )
+        omni_config_group.add_argument(
+            "--host-weight-runtime-root",
+            type=str,
+            default=None,
+            help="Node-local directory containing immutable Host Weight Runtime artifacts.",
+        )
+        omni_config_group.add_argument(
+            "--host-weight-runtime-required",
+            action="store_true",
+            help=(
+                "Require Host Weight Runtime preparation to succeed instead of falling back to the legacy weight path."
+            ),
+        )
+        omni_config_group.add_argument(
+            "--host-weight-runtime-wait-timeout-s",
+            type=_positive_finite_float,
+            default=120.0,
+            help="Seconds to wait for another process's active Host Weight Runtime publication.",
         )
         # Video model parameters (e.g., Wan2.2) - engine-level
         omni_config_group.add_argument(

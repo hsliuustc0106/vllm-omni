@@ -392,7 +392,18 @@ def test_typed_llm_engine_args_preserve_legacy_adapter_behavior(tmp_path):
 
 def test_typed_diffusion_engine_args_use_structured_diffusion_config(tmp_path):
     pipeline, deploy, model = _engine_arg_inputs(tmp_path)
-    legacy_stages, omni_config = _legacy_and_typed_stages(pipeline, deploy, model)
+    legacy_stages, omni_config = _legacy_and_typed_stages(
+        pipeline,
+        deploy,
+        model,
+        cli_overrides={
+            "stage_2_enable_cpu_offload": True,
+            "stage_2_host_weight_runtime_mode": "read_write",
+            "stage_2_host_weight_runtime_root": str(tmp_path / "host-weights"),
+            "stage_2_host_weight_runtime_required": True,
+            "stage_2_host_weight_runtime_wait_timeout_s": 17.5,
+        },
+    )
 
     legacy_args = build_legacy_engine_args_dict(legacy_stages[2], model)
     typed_args = build_engine_args_dict_from_omni_stage_config(
@@ -413,6 +424,15 @@ def test_typed_diffusion_engine_args_use_structured_diffusion_config(tmp_path):
     assert isinstance(typed_args["diffusion_attention_config"], AttentionConfig)
     assert typed_args["diffusion_attention_config"].default.backend == "FLASH_ATTN"
     assert typed_args["diffusion_attention_config"].per_role["cross"].backend == "TORCH_SDPA"
+    assert typed_args["enable_cpu_offload"] is legacy_args["enable_cpu_offload"] is True
+    assert typed_args["host_weight_runtime_mode"] == legacy_args["host_weight_runtime_mode"] == "read_write"
+    assert (
+        typed_args["host_weight_runtime_root"]
+        == legacy_args["host_weight_runtime_root"]
+        == str(tmp_path / "host-weights")
+    )
+    assert typed_args["host_weight_runtime_required"] is legacy_args["host_weight_runtime_required"] is True
+    assert typed_args["host_weight_runtime_wait_timeout_s"] == legacy_args["host_weight_runtime_wait_timeout_s"] == 17.5
 
 
 def test_typed_engine_args_preserve_explicit_backend_default_overrides(tmp_path):

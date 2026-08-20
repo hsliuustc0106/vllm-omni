@@ -96,6 +96,7 @@ The design contracts separate selection mechanics from backend algorithms:
   - [Offloader](module/diffusion/offloader.md)
 - [Execution Platforms](module/execution_platforms.md)
 - [Cache Management](module/cache_management.md)
+- [Host Weight Runtime](module/host_weight_runtime.md)
 - [Quantization](module/quantization.md)
 - [Observability](module/observability.md)
 - [Profiling](module/profiling.md)

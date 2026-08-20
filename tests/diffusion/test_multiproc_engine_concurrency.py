@@ -1181,6 +1181,58 @@ class TestExecutorShutdownCleaner:
         assert first.terminated and second.terminated
         assert not first.is_alive() and not second.is_alive()
 
+    def test_worker_that_survives_terminate_is_killed_and_reaped(self, monkeypatch):
+        from vllm_omni.diffusion.executor import multiproc_executor as executor_module
+
+        class StubbornProcess:
+            name = "worker-stubborn"
+
+            def __init__(self):
+                self.alive = True
+                self.terminated = False
+                self.killed = False
+                self.join_timeouts = []
+
+            def is_alive(self):
+                return self.alive
+
+            def join(self, timeout):
+                self.join_timeouts.append(timeout)
+                if self.killed:
+                    self.alive = False
+
+            def terminate(self):
+                self.terminated = True
+
+            def kill(self):
+                self.killed = True
+
+        monotonic = Mock(side_effect=[100.0, 100.0, 120.0, 120.0, 130.0, 130.0])
+        monkeypatch.setattr(executor_module, "time", SimpleNamespace(monotonic=monotonic))
+        process = StubbornProcess()
+
+        executor_module._ExecutorShutdownCleaner(processes=[process])()
+
+        assert process.join_timeouts == [15.0, 5.0, 5.0]
+        assert process.terminated
+        assert process.killed
+        assert not process.is_alive()
+
+    def test_worker_that_survives_kill_fails_shutdown(self, monkeypatch):
+        from vllm_omni.diffusion.executor import multiproc_executor as executor_module
+
+        process = Mock()
+        process.name = "worker-unkillable"
+        process.is_alive.return_value = True
+        monotonic = Mock(side_effect=[100.0, 100.0, 120.0, 120.0, 130.0, 130.0])
+        monkeypatch.setattr(executor_module, "time", SimpleNamespace(monotonic=monotonic))
+
+        with pytest.raises(RuntimeError, match="survived SIGKILL"):
+            executor_module._ExecutorShutdownCleaner(processes=[process])()
+
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
+
 
 # ───────── monitor thread & death sentinel integration tests ─────────
 

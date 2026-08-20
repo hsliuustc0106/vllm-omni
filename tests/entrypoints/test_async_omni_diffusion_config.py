@@ -362,6 +362,56 @@ def test_serve_cli_forwards_distributed_offload_residency():
     assert engine_args["dlo_resident_layers"] == 20
 
 
+def test_serve_cli_forwards_host_weight_runtime():
+    parser = TrackingArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    OmniServeCommand().subparser_init(subparsers)
+
+    args = parser.parse_args(
+        [
+            "serve",
+            "MiniMaxAI/MiniMax-H3",
+            "--omni",
+            "--host-weight-runtime-mode",
+            "read_write",
+            "--host-weight-runtime-root",
+            "/var/tmp/vllm-omni-host-weights",
+            "--enable-cpu-offload",
+            "--host-weight-runtime-required",
+            "--host-weight-runtime-wait-timeout-s",
+            "17.5",
+        ]
+    )
+
+    explicit_kwargs = args.get_explicit_kwargs_dict()
+    stage_cfg = AsyncOmniEngine._create_default_diffusion_stage_cfg(explicit_kwargs)[0]
+    engine_args = stage_cfg["engine_args"]
+
+    assert engine_args["host_weight_runtime_mode"] == "read_write"
+    assert engine_args["host_weight_runtime_root"] == "/var/tmp/vllm-omni-host-weights"
+    assert engine_args["enable_cpu_offload"] is True
+    assert engine_args["host_weight_runtime_required"] is True
+    assert engine_args["host_weight_runtime_wait_timeout_s"] == 17.5
+
+
+@pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf", "-inf"])
+def test_serve_cli_rejects_invalid_host_weight_runtime_wait_timeout(timeout):
+    parser = TrackingArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    OmniServeCommand().subparser_init(subparsers)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "serve",
+                "MiniMaxAI/MiniMax-H3",
+                "--omni",
+                "--host-weight-runtime-wait-timeout-s",
+                timeout,
+            ]
+        )
+
+
 def test_serve_cli_accepts_diffusion_compile_controls():
     """Ensure both compile controls reach the diffusion stage."""
     parser = TrackingArgumentParser()

@@ -42,6 +42,78 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+class HostWeightOffloadValidationCode(str, Enum):
+    """Stable reason codes for Host Weight Runtime/offloader validation."""
+
+    CONFLICTING_OFFLOAD_MODES = "conflicting_offload_modes"
+    HWR_REQUIRES_OFFLOADER = "hwr_requires_offloader"
+    HWR_DLO_ALLGATHER_UNSUPPORTED = "hwr_dlo_allgather_unsupported"
+    HWR_REQUIRED_WHILE_DISABLED = "hwr_required_while_disabled"
+
+
+class HostWeightOffloadConfigurationError(ValueError):
+    """A fail-fast HWR/offloader configuration error with a stable code."""
+
+    def __init__(
+        self,
+        code: HostWeightOffloadValidationCode,
+        message: str,
+    ) -> None:
+        self.code = code
+        super().__init__(f"[{code.value}] {message}")
+
+
+def validate_host_weight_offload_configuration(
+    *,
+    enable_cpu_offload: bool,
+    enable_layerwise_offload: bool,
+    enable_distributed_layerwise_offload: bool,
+    dlo_use_allgather: bool,
+    host_weight_runtime_mode: str,
+    host_weight_runtime_required: bool,
+) -> None:
+    """Validate the closed HWR/offloader combination before model loading.
+
+    Legacy offloader priority remains unchanged while HWR is disabled. HWR,
+    however, negotiates one exact consumer and transfer plan, so it requires
+    exactly one offload strategy and cannot use DLO's AllGather data path.
+    """
+
+    if host_weight_runtime_mode == "disabled":
+        if host_weight_runtime_required:
+            raise HostWeightOffloadConfigurationError(
+                HostWeightOffloadValidationCode.HWR_REQUIRED_WHILE_DISABLED,
+                "host_weight_runtime_required=True requires Host Weight Runtime mode 'read_only' or 'read_write'",
+            )
+        return
+
+    enabled_modes = tuple(
+        name
+        for name, enabled in (
+            ("model-level", enable_cpu_offload),
+            ("layerwise", enable_layerwise_offload),
+            ("distributed-layerwise", enable_distributed_layerwise_offload),
+        )
+        if enabled
+    )
+    if not enabled_modes:
+        raise HostWeightOffloadConfigurationError(
+            HostWeightOffloadValidationCode.HWR_REQUIRES_OFFLOADER,
+            "Host Weight Runtime requires exactly one CPU offload strategy",
+        )
+    if len(enabled_modes) > 1:
+        raise HostWeightOffloadConfigurationError(
+            HostWeightOffloadValidationCode.CONFLICTING_OFFLOAD_MODES,
+            "Host Weight Runtime requires exactly one CPU offload strategy; "
+            f"enabled modes are {', '.join(enabled_modes)}",
+        )
+    if enable_distributed_layerwise_offload and dlo_use_allgather:
+        raise HostWeightOffloadConfigurationError(
+            HostWeightOffloadValidationCode.HWR_DLO_ALLGATHER_UNSUPPORTED,
+            "Host Weight Runtime supports distributed layerwise offload only with dlo_use_allgather=False",
+        )
+
+
 def normalize_omni_diffusion_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize legacy diffusion kwargs before config construction."""
     normalized = dict(kwargs)
@@ -753,6 +825,18 @@ class OmniDiffusionConfig:
     # Leading main-DiT blocks kept resident by distributed layerwise offload.
     dlo_resident_layers: int = 0
 
+    # Optional independent Host Weight Runtime. ``read_only`` consumes an
+    # existing artifact and falls back on a miss; ``read_write`` may publish a
+    # normalized artifact. The feature remains opt-in while its model/offloader
+    # support matrix is being qualified.
+    host_weight_runtime_mode: str = "disabled"
+    host_weight_runtime_root: str | None = None
+    # When true, an optional pre-bind fallback is promoted by the loader to a
+    # startup failure instead of selecting the legacy weight path.
+    host_weight_runtime_required: bool = False
+    # Maximum time a resolver waits for another process's active publication.
+    host_weight_runtime_wait_timeout_s: float = 120.0
+
     pin_cpu_memory: bool = True  # Use pinned memory for faster transfers when offloading
 
     # VAE memory optimization parameters
@@ -978,6 +1062,23 @@ class OmniDiffusionConfig:
         )
 
     def __post_init__(self):
+        if self.host_weight_runtime_mode not in {"disabled", "read_only", "read_write"}:
+            raise ValueError(
+                "host_weight_runtime_mode must be 'disabled', 'read_only', or "
+                f"'read_write', got {self.host_weight_runtime_mode!r}"
+            )
+        if self.host_weight_runtime_mode != "disabled" and not self.host_weight_runtime_root:
+            raise ValueError("host_weight_runtime_root is required when Host Weight Runtime is enabled")
+        if not math.isfinite(self.host_weight_runtime_wait_timeout_s) or self.host_weight_runtime_wait_timeout_s <= 0:
+            raise ValueError("host_weight_runtime_wait_timeout_s must be finite and positive")
+        validate_host_weight_offload_configuration(
+            enable_cpu_offload=self.enable_cpu_offload,
+            enable_layerwise_offload=self.enable_layerwise_offload,
+            enable_distributed_layerwise_offload=self.enable_distributed_layerwise_offload,
+            dlo_use_allgather=self.dlo_use_allgather,
+            host_weight_runtime_mode=self.host_weight_runtime_mode,
+            host_weight_runtime_required=self.host_weight_runtime_required,
+        )
         if self.diffusion_compile_granularity not in {"regional", "full"}:
             raise ValueError(
                 "diffusion_compile_granularity must be 'regional' or 'full', "

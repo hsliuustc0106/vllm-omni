@@ -37,6 +37,7 @@ _DEQUEUE_TIMEOUT_S = 5.0
 _DLO_DP_WAVE_TIMEOUT_S = float(os.environ.get("VLLM_OMNI_DLO_DP_WAVE_TIMEOUT", 600.0))
 _WORKER_SHUTDOWN_GRACE_S = 15.0
 _WORKER_TERMINATE_GRACE_S = 5.0
+_WORKER_KILL_GRACE_S = 5.0
 _RESULT_PUMP_JOIN_TIMEOUT_S = 2.0
 
 
@@ -85,6 +86,20 @@ class _ExecutorShutdownCleaner:
             terminate_deadline = time.monotonic() + _WORKER_TERMINATE_GRACE_S
             for proc in alive:
                 proc.join(max(0.0, terminate_deadline - time.monotonic()))
+
+            alive = [proc for proc in alive if proc.is_alive()]
+            if alive:
+                for proc in alive:
+                    logger.warning("Killing diffusion worker %s after terminate timeout", proc.name)
+                    proc.kill()
+
+                kill_deadline = time.monotonic() + _WORKER_KILL_GRACE_S
+                for proc in alive:
+                    proc.join(max(0.0, kill_deadline - time.monotonic()))
+
+            survivors = [proc.name for proc in alive if proc.is_alive()]
+            if survivors:
+                raise RuntimeError(f"diffusion workers survived SIGKILL: {survivors}")
 
 
 class MultiprocDiffusionExecutor(DiffusionExecutor):

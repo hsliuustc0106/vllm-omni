@@ -693,6 +693,14 @@ class _DiffusionConfigProjection:
     enable_distributed_layerwise_offload: bool = False
     dlo_use_allgather: bool = True
     dlo_resident_layers: int = Field(default=0, ge=0)
+    host_weight_runtime_mode: Literal["disabled", "read_only", "read_write"] = "disabled"
+    host_weight_runtime_root: str | None = None
+    host_weight_runtime_required: bool = Field(default=False, strict=True)
+    host_weight_runtime_wait_timeout_s: float = Field(
+        default=120.0,
+        gt=0.0,
+        allow_inf_nan=False,
+    )
     pin_cpu_memory: bool = True
     diffusion_compile_granularity: Literal["regional", "full"] = "regional"
     diffusion_compile_dynamic: bool = Field(default=True, strict=True)
@@ -750,9 +758,19 @@ class _DiffusionConfigProjection:
             TransformerConfig,
             build_attention_config,
             parse_kv_cache_skip_selector,
+            validate_host_weight_offload_configuration,
         )
         from vllm_omni.diffusion.diffusion_kv.config import parse_diffusion_kv_cache_mode
         from vllm_omni.quantization import build_quant_config
+
+        validate_host_weight_offload_configuration(
+            enable_cpu_offload=self.enable_cpu_offload,
+            enable_layerwise_offload=self.enable_layerwise_offload,
+            enable_distributed_layerwise_offload=self.enable_distributed_layerwise_offload,
+            dlo_use_allgather=self.dlo_use_allgather,
+            host_weight_runtime_mode=self.host_weight_runtime_mode,
+            host_weight_runtime_required=self.host_weight_runtime_required,
+        )
 
         if self.tf_model_config is None:
             self.tf_model_config = TransformerConfig()

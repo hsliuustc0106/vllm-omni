@@ -9,9 +9,18 @@ import pytest
 import torch
 
 import vllm_omni.diffusion.worker.diffusion_model_runner as model_runner_module
+import vllm_omni.diffusion.worker.diffusion_worker as worker_module
 from tests.helpers.mark import hardware_test
 from vllm_omni.diffusion.data import DiffusionOutput
+from vllm_omni.diffusion.host_weight.ownership import (
+    LegacyReason,
+    PreparedSessionReady,
+    UseLegacy,
+    WeightConsumerOwner,
+    WeightConsumerOwnerPhase,
+)
 from vllm_omni.diffusion.worker.diffusion_model_runner import DiffusionModelRunner
+from vllm_omni.diffusion.worker.diffusion_worker import DiffusionWorker
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch, split_diffusion_output_by_request
 
 pytestmark = [pytest.mark.diffusion]
@@ -808,12 +817,575 @@ def test_execute_model_runs_forward_after_kv_receive(monkeypatch):
     assert runner.pipeline.forward_calls == 1
 
 
+class _RecordingPreparedWeightSession:
+    def __init__(self, pipeline, *, rollback_failures: int = 0):
+        self.pipeline = pipeline
+        self.rollback_failures = rollback_failures
+        self.rollback_calls = 0
+        self._runtime = None
+        self._artifact = None
+        self._binding = None
+
+    def rollback(self):
+        self.rollback_calls += 1
+        if self.rollback_failures:
+            self.rollback_failures -= 1
+            raise RuntimeError("prepared rollback still busy")
+
+
+def _publish_ready_session(
+    owner: WeightConsumerOwner,
+    prepared: _RecordingPreparedWeightSession,
+) -> None:
+    runtime = object()
+    artifact = object()
+    binding = object()
+    prepared._runtime = runtime
+    prepared._artifact = artifact
+    prepared._binding = binding
+    cleanup = owner.begin_preparation(runtime)  # type: ignore[arg-type]
+    cleanup.adopt_artifact(artifact)  # type: ignore[arg-type]
+    cleanup.retain_binding(binding)  # type: ignore[arg-type]
+    cleanup.transfer_to_prepared_session(prepared)  # type: ignore[arg-type]
+    owner.publish_preparation_result(PreparedSessionReady(prepared))  # type: ignore[arg-type]
+
+
+class _RecordingWeightConsumer:
+    def __init__(
+        self,
+        *,
+        expected_prepared: _RecordingPreparedWeightSession,
+        events: list[str],
+        disable_failures: int = 0,
+    ) -> None:
+        self.expected_prepared = expected_prepared
+        self.events = events
+        self.disable_failures = disable_failures
+        self.prepared = None
+        self.enable_calls = 0
+        self.disable_calls = 0
+        self.backend = SimpleNamespace(kind="hwr_backend")
+
+    def adopt_prepared_session(self, prepared) -> None:
+        assert prepared is self.expected_prepared
+        assert self.prepared is None
+        self.prepared = prepared
+        self.events.append("session_adopted")
+
+    def enable_transactionally(self) -> None:
+        assert self.prepared is self.expected_prepared
+        self.enable_calls += 1
+        self.events.append("consumer_enabled")
+
+    def disable(self) -> None:
+        self.disable_calls += 1
+        self.events.append("consumer_disable_attempted")
+        if self.disable_failures:
+            self.disable_failures -= 1
+            raise RuntimeError("consumer cleanup still busy")
+        prepared = self.prepared
+        if prepared is not None:
+            prepared.rollback()
+            self.prepared = None
+        self.events.append("consumer_disabled")
+
+    def host_weight_diagnostics(self) -> dict[str, object]:
+        return {
+            "pinned_slot_budget_bytes": 8192,
+            "idle_state": {
+                "outstanding_units": 0,
+                "bindings": 0,
+                "events": 0,
+            },
+        }
+
+
+class _RecordingWeightConsumerFactory:
+    def __init__(
+        self,
+        *,
+        prepared: _RecordingPreparedWeightSession,
+        events: list[str],
+        consumer_disable_failures: int,
+    ) -> None:
+        self.prepared = prepared
+        self.events = events
+        self.consumer_disable_failures = consumer_disable_failures
+        self.create_calls = 0
+        self.consumer: _RecordingWeightConsumer | None = None
+
+    def create_into(self, *, owner: WeightConsumerOwner, pipeline) -> None:
+        self.create_calls += 1
+        self.events.append("consumer_created")
+        assert owner.prepared_session is self.prepared
+        assert pipeline is self.prepared.pipeline
+        consumer = _RecordingWeightConsumer(
+            expected_prepared=self.prepared,
+            events=self.events,
+            disable_failures=self.consumer_disable_failures,
+        )
+        self.consumer = consumer
+        owner.publish_consumer(consumer)
+
+
+class _OwnerPublishingLoader:
+    def __init__(
+        self,
+        *,
+        owner: WeightConsumerOwner,
+        pipeline,
+        prepared: _RecordingPreparedWeightSession,
+        events: list[str],
+        behavior: str,
+        host_weight_plan,
+        evidence_error: BaseException | None,
+    ) -> None:
+        self.owner = owner
+        self.pipeline = pipeline
+        self.prepared = prepared
+        self.events = events
+        self.behavior = behavior
+        self.host_weight_plan = host_weight_plan
+        self.evidence_error = evidence_error
+        self.host_weight_runtime_fell_back = behavior == "fallback"
+        self._evidence = (
+            {
+                "outcome": "fallback",
+                "events": ["fallback"],
+                "code": "optional_artifact_unavailable",
+            }
+            if self.host_weight_runtime_fell_back
+            else {
+                "outcome": "ready",
+                "events": ["cache_hit", "ready"],
+                "artifact_key": "a" * 64,
+            }
+        )
+
+    def load_model(self, **kwargs):
+        del kwargs
+        self.events.append("loader_load")
+        if self.behavior == "ready":
+            _publish_ready_session(self.owner, self.prepared)
+            self.events.append("prepared_published")
+        elif self.behavior == "fallback":
+            self.owner.publish_preparation_result(
+                UseLegacy(
+                    LegacyReason.OPTIONAL_ARTIFACT_UNAVAILABLE,
+                    "single-rank optional miss",
+                )
+            )
+            self.owner.close()
+            self.events.append("fallback_owner_closed")
+        else:  # pragma: no cover - harness contract
+            raise AssertionError(f"unknown loader behavior {self.behavior!r}")
+        return self.pipeline
+
+    def take_host_weight_plan(self):
+        plan = self.host_weight_plan
+        self.host_weight_plan = None
+        return plan
+
+    def take_host_weight_runtime_evidence(self):
+        if self.evidence_error is not None:
+            raise self.evidence_error
+        evidence = self._evidence
+        self._evidence = None
+        return evidence
+
+
+class _RecordingLegacyBackend:
+    def __init__(self) -> None:
+        self.enable_calls = 0
+        self.disable_calls = 0
+        self.pipeline = None
+
+    def enable(self, pipeline) -> None:
+        self.enable_calls += 1
+        self.pipeline = pipeline
+
+    def disable(self) -> None:
+        self.disable_calls += 1
+        self.pipeline = None
+
+
+class _NormalMemoryProfiler:
+    consumed_memory = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        del exc_type, exc, tb
+        return False
+
+
+def _make_host_weight_load_runner():
+    runner = object.__new__(DiffusionModelRunner)
+    runner.vllm_config = object()
+    runner.device = torch.device("cpu")
+    runner.pipeline = None
+    runner.cache_backend = None
+    runner.offload_backend = None
+    runner._weight_consumer_owner = None
+    runner.prompt_embed_cache = None
+    runner.model_memory_usage = 0
+    runner.host_weight_runtime_evidence = {"outcome": "unavailable"}
+    runner.host_weight_runtime_fell_back = False
+    runner.od_config = SimpleNamespace(
+        enable_cpu_offload=True,
+        enable_layerwise_offload=False,
+        enable_distributed_layerwise_offload=False,
+        host_weight_runtime_mode="read_only",
+        host_weight_runtime_required=False,
+        streaming_output=False,
+        step_execution=False,
+        model_class_name="TestPipeline",
+        enforce_eager=True,
+        cache_backend=None,
+        cache_config={},
+        enable_prompt_embed_cache=False,
+        prompt_embed_cache_size=1,
+    )
+    return runner
+
+
+def _install_host_weight_load_doubles(
+    monkeypatch,
+    runner,
+    *,
+    behavior: str = "ready",
+    profiler_cls=_NormalMemoryProfiler,
+    prepared_rollback_failures: int = 0,
+    consumer_disable_failures: int = 0,
+    evidence_error: BaseException | None = None,
+):
+    events: list[str] = []
+    pipeline = SimpleNamespace(transformer=torch.nn.Identity())
+    prepared = _RecordingPreparedWeightSession(
+        pipeline,
+        rollback_failures=prepared_rollback_failures,
+    )
+    consumer_factory = _RecordingWeightConsumerFactory(
+        prepared=prepared,
+        events=events,
+        consumer_disable_failures=consumer_disable_failures,
+    )
+    legacy_plan = object() if behavior == "fallback" else None
+    legacy_backend = _RecordingLegacyBackend()
+    state = SimpleNamespace(
+        events=events,
+        owner=None,
+        owner_seen_by_factory=None,
+        loader=None,
+        prepared=prepared,
+        consumer_factory=consumer_factory,
+        pipeline=pipeline,
+        legacy_plan=legacy_plan,
+        legacy_backend=legacy_backend,
+    )
+
+    def construct_owner():
+        owner = WeightConsumerOwner()
+        state.owner = owner
+        events.append("owner_constructed")
+        return owner
+
+    def construct_consumer_factory(od_config, device):
+        del od_config, device
+        assert runner._weight_consumer_owner is state.owner
+        state.owner_seen_by_factory = runner._weight_consumer_owner
+        events.append("factory_constructed")
+        return consumer_factory
+
+    def construct_loader(
+        load_config,
+        od_config=None,
+        *,
+        weight_consumer_owner=None,
+        weight_consumer_factory=None,
+    ):
+        del load_config, od_config
+        assert runner._weight_consumer_owner is state.owner
+        assert weight_consumer_owner is state.owner
+        assert weight_consumer_factory is consumer_factory
+        events.append("loader_constructed")
+        loader = _OwnerPublishingLoader(
+            owner=weight_consumer_owner,
+            pipeline=pipeline,
+            prepared=prepared,
+            events=events,
+            behavior=behavior,
+            host_weight_plan=legacy_plan,
+            evidence_error=evidence_error,
+        )
+        state.loader = loader
+        return loader
+
+    def get_legacy_backend(od_config, *, device, host_weight_plan):
+        del od_config, device
+        events.append("legacy_backend_selected")
+        assert behavior == "fallback"
+        assert host_weight_plan is legacy_plan
+        return legacy_backend
+
+    monkeypatch.setattr(model_runner_module, "LoadConfig", lambda: object())
+    monkeypatch.setattr(model_runner_module, "WeightConsumerOwner", construct_owner)
+    monkeypatch.setattr(
+        model_runner_module,
+        "BuiltinOffloadWeightConsumerFactory",
+        construct_consumer_factory,
+    )
+    monkeypatch.setattr(model_runner_module, "DiffusersPipelineLoader", construct_loader)
+    monkeypatch.setattr(model_runner_module, "DeviceMemoryProfiler", profiler_cls)
+    monkeypatch.setattr(model_runner_module, "get_offload_backend", get_legacy_backend)
+    monkeypatch.setattr(model_runner_module, "get_cache_backend", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        model_runner_module,
+        "resolve_prompt_embed_cache_config",
+        lambda **_kwargs: (False, 1),
+    )
+    monkeypatch.setattr(
+        model_runner_module.current_omni_platform,
+        "init_diffusion_model_runner_runtime",
+        lambda **_kwargs: None,
+    )
+    return state
+
+
+@pytest.mark.core_model
+@pytest.mark.cpu
+def test_hwr_owner_is_installed_before_factory_and_loader(monkeypatch):
+    runner = _make_host_weight_load_runner()
+    state = _install_host_weight_load_doubles(monkeypatch, runner)
+
+    DiffusionModelRunner.load_model(runner)
+
+    assert state.events[:3] == [
+        "owner_constructed",
+        "factory_constructed",
+        "loader_constructed",
+    ]
+    assert state.owner_seen_by_factory is state.owner
+    assert state.loader.owner is state.owner
+    assert runner._weight_consumer_owner is state.owner
+    runner.shutdown()
+
+
+@pytest.mark.core_model
+@pytest.mark.cpu
+def test_hwr_ready_consumer_enables_and_exports_diagnostics(monkeypatch):
+    runner = _make_host_weight_load_runner()
+    state = _install_host_weight_load_doubles(monkeypatch, runner)
+
+    DiffusionModelRunner.load_model(runner)
+
+    owner = state.owner
+    consumer = state.consumer_factory.consumer
+    assert owner.phase is WeightConsumerOwnerPhase.CONSUMER
+    assert state.consumer_factory.create_calls == 1
+    assert consumer is not None
+    assert consumer.enable_calls == 1
+    assert consumer.prepared is state.prepared
+    assert runner.pipeline is state.pipeline
+    assert runner.offload_backend is consumer.backend
+    assert state.legacy_backend.enable_calls == 0
+    assert runner.get_host_weight_runtime_evidence() == {
+        "outcome": "ready",
+        "events": ["cache_hit", "ready"],
+        "artifact_key": "a" * 64,
+        "pinned_slot_budget_bytes": 8192,
+        "idle_state": {
+            "outstanding_units": 0,
+            "bindings": 0,
+            "events": 0,
+        },
+        "ordinary_loader_fallback": False,
+    }
+
+    runner.shutdown()
+
+    assert consumer.disable_calls == 1
+    assert state.prepared.rollback_calls == 1
+    assert owner.phase is WeightConsumerOwnerPhase.CLOSED
+    assert runner._weight_consumer_owner is None
+    assert runner.offload_backend is None
+
+
+@pytest.mark.core_model
+@pytest.mark.cpu
+def test_optional_hwr_fallback_uses_independent_legacy_backend(monkeypatch):
+    runner = _make_host_weight_load_runner()
+    state = _install_host_weight_load_doubles(
+        monkeypatch,
+        runner,
+        behavior="fallback",
+    )
+
+    DiffusionModelRunner.load_model(runner)
+
+    assert state.owner.phase is WeightConsumerOwnerPhase.CLOSED
+    assert runner._weight_consumer_owner is None
+    assert state.consumer_factory.create_calls == 0
+    assert state.legacy_backend.enable_calls == 1
+    assert state.legacy_backend.pipeline is state.pipeline
+    assert runner.offload_backend is state.legacy_backend
+    assert runner.host_weight_runtime_fell_back is True
+    assert runner.get_host_weight_runtime_evidence() == {
+        "outcome": "fallback",
+        "events": ["fallback"],
+        "code": "optional_artifact_unavailable",
+        "ordinary_loader_fallback": True,
+    }
+
+    runner.shutdown()
+
+    assert state.legacy_backend.disable_calls == 1
+    assert runner.offload_backend is None
+
+
+@pytest.mark.core_model
+@pytest.mark.cpu
+def test_hwr_ready_owner_retains_failed_preflight_cleanup_for_shutdown_retry(
+    monkeypatch,
+):
+    primary = ValueError("primary evidence extraction failure")
+    runner = _make_host_weight_load_runner()
+    state = _install_host_weight_load_doubles(
+        monkeypatch,
+        runner,
+        prepared_rollback_failures=1,
+        evidence_error=primary,
+    )
+
+    with pytest.raises(ValueError, match="primary evidence extraction failure") as exc_info:
+        DiffusionModelRunner.load_model(runner)
+
+    assert exc_info.value is primary
+    assert any("Closing the HWR owner" in note for note in primary.__notes__)
+    assert state.prepared.rollback_calls == 1
+    assert runner._weight_consumer_owner is state.owner
+    assert state.owner.phase is WeightConsumerOwnerPhase.PREPARATION_RESULT
+    assert state.consumer_factory.create_calls == 0
+
+    runner.shutdown()
+
+    assert state.prepared.rollback_calls == 2
+    assert state.owner.phase is WeightConsumerOwnerPhase.CLOSED
+    assert runner._weight_consumer_owner is None
+
+
+@pytest.mark.core_model
+@pytest.mark.cpu
+def test_hwr_active_consumer_cleanup_failure_is_retained_for_shutdown_retry(
+    monkeypatch,
+):
+    primary = RuntimeError("primary cache enable failure")
+    runner = _make_host_weight_load_runner()
+    runner.od_config.cache_backend = "test"
+    state = _install_host_weight_load_doubles(
+        monkeypatch,
+        runner,
+        consumer_disable_failures=1,
+    )
+
+    class FailingCacheBackend:
+        def enable(self, pipeline):
+            assert pipeline is state.pipeline
+            raise primary
+
+    monkeypatch.setattr(
+        model_runner_module,
+        "get_cache_backend",
+        lambda *_args, **_kwargs: FailingCacheBackend(),
+    )
+
+    with pytest.raises(RuntimeError, match="primary cache enable failure") as exc_info:
+        DiffusionModelRunner.load_model(runner)
+
+    assert exc_info.value is primary
+    assert any("Closing the HWR owner" in note for note in primary.__notes__)
+    consumer = state.consumer_factory.consumer
+    assert consumer is not None
+    assert consumer.disable_calls == 1
+    assert state.prepared.rollback_calls == 0
+    assert state.owner.phase is WeightConsumerOwnerPhase.CONSUMER
+    assert runner._weight_consumer_owner is state.owner
+    assert runner.offload_backend is consumer.backend
+
+    with pytest.raises(RuntimeError, match="still owns an offload lifecycle"):
+        DiffusionModelRunner.load_model(runner)
+    assert runner._weight_consumer_owner is state.owner
+    assert runner.offload_backend is consumer.backend
+    assert consumer.disable_calls == 1
+
+    runner.shutdown()
+
+    assert consumer.disable_calls == 2
+    assert state.prepared.rollback_calls == 1
+    assert state.owner.phase is WeightConsumerOwnerPhase.CLOSED
+    assert runner._weight_consumer_owner is None
+    assert runner.offload_backend is None
+
+
+@pytest.mark.core_model
+@pytest.mark.cpu
+def test_worker_load_shuts_down_runner_after_platform_sync_failure(monkeypatch):
+    primary = RuntimeError("primary platform synchronization failure")
+
+    class _Runner:
+        def __init__(self):
+            self.pipeline = object()
+            self.load_calls = 0
+            self.shutdown_calls = 0
+
+        def load_model(self, **_kwargs):
+            self.load_calls += 1
+
+        def shutdown(self):
+            self.shutdown_calls += 1
+
+    runner = _Runner()
+    worker = object.__new__(DiffusionWorker)
+    worker.model_runner = runner
+    worker.vllm_config = object()
+    worker.local_rank = 0
+    worker.rank = 0
+    worker.od_config = SimpleNamespace(
+        quantization_config=None,
+        force_cutlass_fp8=False,
+    )
+    monkeypatch.setattr(worker_module, "set_forward_context", _noop_forward_context)
+    monkeypatch.setattr(worker_module, "set_current_vllm_config", _noop_forward_context)
+    monkeypatch.setattr(
+        worker_module.current_omni_platform,
+        "synchronize",
+        lambda: (_ for _ in ()).throw(primary),
+    )
+
+    with pytest.raises(RuntimeError, match="platform synchronization failure") as exc_info:
+        DiffusionWorker.load_model(worker)
+
+    assert exc_info.value is primary
+    assert runner.load_calls == 1
+    assert runner.shutdown_calls == 1
+
+
 @pytest.mark.core_model
 @pytest.mark.cpu
 def test_load_model_clears_cache_backend_for_unsupported_pipeline(monkeypatch):
     class _DummyLoader:
-        def __init__(self, load_config, od_config=None):
+        def __init__(
+            self,
+            load_config,
+            od_config=None,
+            *,
+            weight_consumer_owner=None,
+            weight_consumer_factory=None,
+        ):
             del load_config, od_config
+            assert weight_consumer_owner is None
+            assert weight_consumer_factory is None
 
         def load_model(self, **kwargs):
             del kwargs
@@ -821,6 +1393,11 @@ def test_load_model_clears_cache_backend_for_unsupported_pipeline(monkeypatch):
 
         def take_host_weight_plan(self):
             return None
+
+        def take_host_weight_runtime_evidence(self):
+            return None
+
+        host_weight_runtime_fell_back = False
 
     class _DummyMemoryProfiler:
         consumed_memory = 0
@@ -848,14 +1425,18 @@ def test_load_model_clears_cache_backend_for_unsupported_pipeline(monkeypatch):
     runner.pipeline = None
     runner.cache_backend = None
     runner.offload_backend = None
+    runner._weight_consumer_owner = None
     runner.od_config = SimpleNamespace(
         enable_cpu_offload=False,
         enable_layerwise_offload=False,
+        enable_distributed_layerwise_offload=False,
+        host_weight_runtime_mode="disabled",
         cache_backend="cache_dit",
         cache_config={},
         model_class_name="NextStep11Pipeline",
         enforce_eager=True,
         streaming_output=False,
+        step_execution=False,
     )
 
     monkeypatch.setattr(model_runner_module, "LoadConfig", lambda: object())
@@ -864,7 +1445,12 @@ def test_load_model_clears_cache_backend_for_unsupported_pipeline(monkeypatch):
     monkeypatch.setattr(
         model_runner_module,
         "get_offload_backend",
-        lambda od_config, device, host_weight_plan: None,
+        lambda od_config, *, device, host_weight_plan: None,
+    )
+    monkeypatch.setattr(
+        model_runner_module.current_omni_platform,
+        "init_diffusion_model_runner_runtime",
+        lambda **_kwargs: None,
     )
     monkeypatch.setattr(
         model_runner_module, "get_cache_backend", lambda cache_backend, cache_config: dummy_cache_backend

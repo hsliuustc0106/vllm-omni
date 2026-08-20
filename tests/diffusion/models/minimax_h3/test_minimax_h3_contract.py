@@ -495,6 +495,18 @@ def test_shifted_sigma_schedule_matches_reference_values():
     )
 
 
+@pytest.mark.parametrize("num_steps", [0, 1])
+def test_uniform_sigma_schedule_requires_two_grid_points(num_steps):
+    from vllm_omni.diffusion.models.minimax_h3.time_request import (
+        minimax_h3_time_shift_sigmas,
+    )
+
+    with pytest.raises(ValueError, match=r">= 2"):
+        minimax_h3_time_shift_sigmas(num_steps=num_steps, shift_scale=12.0)
+
+    assert minimax_h3_time_shift_sigmas(num_steps=2, shift_scale=12.0) == [1.0, 0.0]
+
+
 def test_base_schedule_overrides_the_uniform_sigma_positions():
     from vllm_omni.diffusion.models.minimax_h3.time_request import (
         minimax_h3_time_shift_sigmas,
@@ -1688,8 +1700,10 @@ def test_ref2va_probe_counts_frames_only_when_metadata_is_missing(monkeypatch):
     monkeypatch.setattr(
         reference_video_module.subprocess,
         "run",
-        lambda command, **kwargs: calls.append((command, kwargs))
-        or SimpleNamespace(stdout=json.dumps(first_probe if len(calls) == 1 else second_probe)),
+        lambda command, **kwargs: (
+            calls.append((command, kwargs))
+            or SimpleNamespace(stdout=json.dumps(first_probe if len(calls) == 1 else second_probe))
+        ),
     )
 
     metadata = reference_video_module._probe_video("prepared.mp4")

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
+from collections.abc import Mapping
+from typing import Any
 
 import torch.nn as nn
 from vllm.logger import init_logger
@@ -395,6 +397,8 @@ def _prepare_diffusion_quant_config(
 
 def initialize_model(
     od_config: OmniDiffusionConfig,
+    *,
+    model_init_kwargs: Mapping[str, Any] | None = None,
 ) -> nn.Module:
     """Initialize a diffusion model from the registry.
 
@@ -416,8 +420,9 @@ def initialize_model(
     model_class = DiffusionModelRegistry._try_load_model_cls(od_config.model_class_name)
     if model_class is not None:
         _prepare_diffusion_quant_config(od_config, model_class)
+        init_kwargs = dict(model_init_kwargs or {})
         with set_current_diffusion_config(od_config):
-            model = model_class(od_config=od_config)
+            model = model_class(od_config=od_config, **init_kwargs)
 
         vae_pp_size = od_config.parallel_config.vae_patch_parallel_size
         is_distributed_vae = hasattr(model, "vae") and isinstance(model.vae, DistributedVaeMixin)
