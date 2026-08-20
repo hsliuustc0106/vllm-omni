@@ -693,6 +693,14 @@ class _DiffusionConfigProjection:
     enable_distributed_layerwise_offload: bool = False
     dlo_use_allgather: bool = True
     dlo_resident_layers: int = Field(default=0, ge=0)
+    host_weight_runtime_mode: Literal["disabled", "read_only", "read_write"] = "disabled"
+    host_weight_runtime_root: str | None = None
+    host_weight_runtime_required: bool = Field(default=False, strict=True)
+    host_weight_runtime_wait_timeout_s: float = Field(
+        default=120.0,
+        gt=0.0,
+        allow_inf_nan=False,
+    )
     pin_cpu_memory: bool = True
     diffusion_compile_granularity: Literal["regional", "full"] = "regional"
     diffusion_compile_dynamic: bool = Field(default=True, strict=True)

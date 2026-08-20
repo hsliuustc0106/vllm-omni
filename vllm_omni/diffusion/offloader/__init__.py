@@ -31,6 +31,11 @@ from .tensor_utils import (
     make_offload_placeholder,
     set_tensor_storage,
 )
+from .weight_consumer import (
+    BuiltinOffloadWeightConsumer,
+    BuiltinOffloadWeightConsumerFactory,
+    ConsumerLifecyclePhase,
+)
 
 logger = init_logger(__name__)
 
@@ -39,6 +44,9 @@ __all__ = [
     "OffloadConfig",
     "OffloadPlan",
     "OffloadStrategy",
+    "BuiltinOffloadWeightConsumer",
+    "BuiltinOffloadWeightConsumerFactory",
+    "ConsumerLifecyclePhase",
     "LayerWiseOffloadBackend",
     "DistributedLayerwiseOffloadBackend",
     "DistributedLayerwiseOffloadHook",

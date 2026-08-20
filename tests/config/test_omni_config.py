@@ -907,6 +907,12 @@ def test_structured_diffusion_config_rejects_invalid_compile_granularity():
         omni_config_module._DiffusionConfigProjection(diffusion_compile_granularity="block")
 
 
+@pytest.mark.parametrize("timeout", [0.0, -1.0, float("nan"), float("inf"), float("-inf")])
+def test_structured_diffusion_config_rejects_invalid_host_weight_runtime_wait_timeout(timeout):
+    with pytest.raises(ValidationError, match="host_weight_runtime_wait_timeout_s"):
+        omni_config_module._DiffusionConfigProjection(host_weight_runtime_wait_timeout_s=timeout)
+
+
 def test_from_pipeline_config_matches_stage_config_to_omegaconf_behavior_for_representative_stage():
     pipeline = _resolve_pipeline_or_skip("qwen3_tts")
     legacy_stage = merge_pipeline_deploy(pipeline, _load_default_deploy(pipeline))[0]

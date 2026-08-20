@@ -18,7 +18,12 @@ This module implements the RFC-1 "Distributed Layerwise Offload" mechanism that:
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from enum import Enum
 from itertools import chain
+from operator import attrgetter
+from types import MappingProxyType
 from typing import Any
 
 import torch
@@ -27,6 +32,15 @@ from torch import nn
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.hooks import HookRegistry, ModelHook
+from vllm_omni.diffusion.host_weight.session import (
+    DetachMode,
+    DeviceBindingLifetime,
+    PreparedWeightAccessSession,
+    ReleaseTarget,
+    UnitReadRequest,
+    WeightAccessSession,
+)
+from vllm_omni.diffusion.host_weight.transfer import TransferPlanKind, UnitKind
 from vllm_omni.diffusion.model_loader.host_weight_plan import (
     HostWeightPlan,
 )
@@ -50,11 +64,310 @@ from .tensor_utils import (
 
 logger = init_logger(__name__)
 
+
+def _report_cleanup_failure(
+    primary_error: BaseException,
+    action: str,
+    cleanup_error: BaseException,
+) -> None:
+    """Report cleanup failure without replacing the primary exception."""
+
+    try:
+        note = f"{action} also failed: {type(cleanup_error).__name__}: {cleanup_error}"
+    except BaseException:
+        note = f"{action} also failed"
+    try:
+        primary_error.add_note(note)
+    except BaseException:
+        pass
+    try:
+        logger.error(
+            "%s while handling %s",
+            note,
+            type(primary_error).__name__,
+            exc_info=(
+                type(cleanup_error),
+                cleanup_error,
+                cleanup_error.__traceback__,
+            ),
+        )
+    except BaseException:
+        pass
+
+
 # Threshold (in MB) for deciding whether a non-block DiT submodule should
 # use layerwise offload (streaming hooks) or be moved to GPU as a resident
 # module.  Submodules larger than this are offloaded to save HBM; smaller
 # ones stay resident for lower latency.
 _ON_DEMAND_THRESHOLD_MB = 1024
+
+
+class _SessionTeardownPhase(Enum):
+    ACTIVE = "active"
+    QUIESCED = "quiesced"
+    CLOSED = "closed"
+
+
+@dataclass
+class _SessionBlockBinding:
+    block_path: str
+    block: nn.Module
+    unit: Any
+    device_binding: Any | None = None
+    device_planes: Any | None = None
+    slot: int | None = None
+
+
+@dataclass
+class _WeightSessionHandle:
+    session: WeightAccessSession | None = None
+    fail_closed_callback: Callable[[], None] | None = None
+
+    def require(self) -> WeightAccessSession:
+        if self.session is None:
+            raise RuntimeError("DLO host-weight session is not committed")
+        return self.session
+
+    def fail_closed(self, primary_error: BaseException) -> None:
+        """Abort the owning backend without replacing the hook failure."""
+        callback = self.fail_closed_callback
+        if callback is None:
+            return
+        try:
+            callback()
+        except BaseException as cleanup_error:
+            _report_cleanup_failure(
+                primary_error,
+                "DLO host-weight terminal cleanup",
+                cleanup_error,
+            )
+
+
+@dataclass
+class _ResidentUnitState:
+    unit: Any
+    device_binding: Any | None = None
+    device_planes: Any | None = None
+
+
+class _SessionResidentController:
+    """Bind resident catalog units without reflecting live module tensors."""
+
+    def __init__(
+        self,
+        units: list[Any],
+        *,
+        device: torch.device,
+        pin_memory: bool,
+    ) -> None:
+        self.device = device
+        self.states = [_ResidentUnitState(unit) for unit in units]
+        capacities: dict[torch.dtype, int] = {}
+        for unit in units:
+            totals: dict[torch.dtype, int] = {}
+            for plane in unit.planes:
+                totals[plane.dtype] = totals.get(plane.dtype, 0) + plane.storage_numel
+            for dtype, total in totals.items():
+                capacities[dtype] = max(capacities.get(dtype, 0), total)
+        self.staging = {
+            dtype: torch.empty(
+                size,
+                dtype=dtype,
+                device="cpu",
+                pin_memory=pin_memory,
+            )
+            for dtype, size in capacities.items()
+        }
+        self._pending_units: list[Any] = []
+
+    @property
+    def loaded(self) -> bool:
+        return any(state.device_binding is not None for state in self.states)
+
+    def load(self, session: WeightAccessSession) -> None:
+        for state in self.states:
+            if state.device_binding is not None:
+                continue
+            offsets: dict[torch.dtype, int] = {}
+            host_planes: dict[Any, torch.Tensor] = {}
+            for plane in state.unit.planes:
+                offset = offsets.get(plane.dtype, 0)
+                host_planes[plane.plane_id] = self.staging[plane.dtype][offset : offset + plane.storage_numel]
+                offsets[plane.dtype] = offset + plane.storage_numel
+            prepared_unit = session.open_unit(UnitReadRequest(unit_id=state.unit.unit_id))
+            self._pending_units.append(prepared_unit)
+            try:
+                publish = getattr(prepared_unit, "publish", None)
+                if callable(publish):
+                    publish()
+                if prepared_unit.layout != state.unit:
+                    raise RuntimeError(f"open_unit returned the wrong layout for {state.unit.unit_id!r}")
+                prepared_unit.copy_into(host_planes)
+            except BaseException as primary_error:
+                try:
+                    prepared_unit.close()
+                except BaseException as cleanup_error:
+                    _report_cleanup_failure(
+                        primary_error,
+                        "closing a failed DLO resident weight read",
+                        cleanup_error,
+                    )
+                else:
+                    self._pending_units.remove(prepared_unit)
+                raise
+            try:
+                prepared_unit.close()
+            except BaseException:
+                raise
+            else:
+                self._pending_units.remove(prepared_unit)
+
+            device_planes: dict[Any, torch.Tensor] = {}
+            for plane in state.unit.planes:
+                host_plane = host_planes[plane.plane_id]
+                device_plane = torch.empty(
+                    plane.storage_numel,
+                    dtype=plane.dtype,
+                    device=self.device,
+                )
+                device_plane.copy_(
+                    host_plane,
+                    non_blocking=host_plane.is_pinned(),
+                )
+                device_planes[plane.plane_id] = device_plane
+            current_omni_platform.synchronize()
+            state.device_binding = session.bind_device(
+                state.unit.unit_id,
+                device_planes,
+                lifetime=DeviceBindingLifetime.RESIDENT,
+            )
+            state.device_planes = MappingProxyType(device_planes)
+            publish = getattr(state.device_binding, "publish", None)
+            if callable(publish):
+                publish()
+
+    def release(self) -> None:
+        first_error: BaseException | None = None
+        synchronized = False
+        for prepared_unit in tuple(self._pending_units):
+            try:
+                prepared_unit.close()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+                else:
+                    _report_cleanup_failure(
+                        first_error,
+                        "closing another pending DLO resident weight read",
+                        exc,
+                    )
+            else:
+                self._pending_units.remove(prepared_unit)
+        try:
+            current_omni_platform.synchronize()
+            synchronized = True
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+            else:
+                _report_cleanup_failure(
+                    first_error,
+                    "synchronizing DLO resident teardown",
+                    exc,
+                )
+        if not synchronized:
+            assert first_error is not None
+            raise first_error
+        for state in self.states:
+            if state.device_binding is not None:
+                try:
+                    state.device_binding.release(ReleaseTarget.PLACEHOLDER)
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+                    else:
+                        _report_cleanup_failure(
+                            first_error,
+                            "releasing another DLO resident device binding",
+                            exc,
+                        )
+                else:
+                    state.device_binding = None
+                    state.device_planes = None
+        if first_error is not None:
+            raise first_error
+
+    def close(self) -> None:
+        self.release()
+        self.staging.clear()
+
+
+def _enum_value(value: Any) -> Any:
+    return getattr(value, "value", value)
+
+
+def _pinned_cpu_storage_bytes(tensors: Iterable[torch.Tensor]) -> int:
+    seen: set[tuple[int, int]] = set()
+    total = 0
+    for tensor in tensors:
+        if tensor.device.type != "cpu" or not tensor.is_pinned():
+            continue
+        storage = tensor.untyped_storage()
+        key = (storage.data_ptr(), storage.nbytes())
+        if key in seen:
+            continue
+        seen.add(key)
+        total += storage.nbytes()
+    return total
+
+
+def _incomplete_event_count(events: Iterable[Any | None]) -> int:
+    seen: set[int] = set()
+    count = 0
+    for event in events:
+        if event is None or id(event) in seen:
+            continue
+        seen.add(id(event))
+        query = getattr(event, "query", None)
+        if callable(query):
+            try:
+                if bool(query()):
+                    continue
+            except BaseException:
+                pass
+        count += 1
+    return count
+
+
+def _resolve_execution_module(target: nn.Module, module_path: object) -> nn.Module:
+    relative_path = str(module_path)
+    if relative_path == ".":
+        return target
+    try:
+        return target.get_submodule(relative_path)
+    except AttributeError as exc:
+        raise ValueError(
+            f"selected DLO transfer plan references missing target-relative module {relative_path!r}"
+        ) from exc
+
+
+def _validate_session_capabilities(prepared: PreparedWeightAccessSession) -> None:
+    capabilities = prepared.capabilities
+    plan = prepared.transfer_plan
+    if _enum_value(plan.plan_kind) != TransferPlanKind.BLOCKS_PLUS_RESIDENT.value:
+        raise ValueError("DLO no-AllGather requires the 'blocks_plus_resident' transfer plan")
+    if _enum_value(capabilities.selected_transfer_plan_kind) != TransferPlanKind.BLOCKS_PLUS_RESIDENT.value:
+        raise ValueError("DLO host-weight capabilities select a different transfer plan kind")
+    if capabilities.selected_transfer_plan_id != plan.plan_id:
+        raise ValueError("DLO host-weight capabilities select a different transfer plan ID")
+    supported_kinds = {_enum_value(kind) for kind in capabilities.unit_kinds}
+    if UnitKind.BLOCK.value not in supported_kinds:
+        raise ValueError("DLO host-weight session does not support block transfer units")
+    access_features = {_enum_value(feature) for feature in capabilities.access_features}
+    if "complete_tensor_read" not in access_features:
+        raise ValueError("DLO host-weight session does not support complete-tensor reads")
+    if _enum_value(capabilities.host_copy_mode) != "synchronous":
+        raise ValueError("DLO no-AllGather requires synchronous host copies")
 
 
 class DistributedLayerwiseOffloadHook(ModelHook):
@@ -83,6 +396,9 @@ class DistributedLayerwiseOffloadHook(ModelHook):
         shared_buffers: list[dict[torch.dtype, torch.Tensor] | None] | None = None,
         rank_local_mmap: bool = False,
         tensor_transforms: dict[int, Any] | None = None,
+        current_weight_binding: _SessionBlockBinding | None = None,
+        next_weight_binding: _SessionBlockBinding | None = None,
+        weight_session_handle: _WeightSessionHandle | None = None,
     ):
         assert isinstance(next_block, nn.Module), "transformer block must be type `torch.nn.Module`"
 
@@ -94,6 +410,20 @@ class DistributedLayerwiseOffloadHook(ModelHook):
         self.pin_memory = pin_memory
         self.rank_local_mmap = rank_local_mmap
         self.tensor_transforms = tensor_transforms or {}
+        session_args = (
+            current_weight_binding,
+            next_weight_binding,
+            weight_session_handle,
+        )
+        if any(arg is not None for arg in session_args) and not all(arg is not None for arg in session_args):
+            raise ValueError("DLO current/next bindings and session handle must be supplied together")
+        self.current_weight_binding = current_weight_binding
+        self.next_weight_binding = next_weight_binding
+        self.weight_session_handle = weight_session_handle
+        self._uses_weight_session = next_weight_binding is not None
+        if self.rank_local_mmap and self._uses_weight_session:
+            raise ValueError("A DLO hook cannot consume checkpoint mmap and a host-weight session at the same time")
+        self.uses_bounded_host_source = self.rank_local_mmap or self._uses_weight_session
 
         self.copy_stream = copy_stream or current_omni_platform.Stream()
         self.comm_stream = comm_stream or current_omni_platform.Stream()
@@ -161,6 +491,8 @@ class DistributedLayerwiseOffloadHook(ModelHook):
         # Pending async AllGather work (prevent GC before completion).
         self._pending_work: Any | None = None
         self._cached_repoint: list | None = None
+        self._session_slot_bindings: list[_SessionBlockBinding | None] | None = None
+        self._pending_weight_reads: list[Any] = []
 
     # ------------------------------------------------------------------ #
     #  DTensor helpers (shared with LayerwiseOffloadHook)                 #
@@ -169,19 +501,36 @@ class DistributedLayerwiseOffloadHook(ModelHook):
     def initialize_hook(self, module: nn.Module) -> nn.Module:
         module = super().initialize_hook(module)
 
-        self.block_parameters = dict(module.named_parameters())
-        self.block_buffers = dict(module.named_buffers())
+        block_parameters = dict(module.named_parameters())
+        block_buffers = dict(module.named_buffers())
+        if self._uses_weight_session:
+            assert self.current_weight_binding is not None
+            assert self.next_weight_binding is not None
+            if self.current_weight_binding.block is not module:
+                raise ValueError("DLO current session binding does not match the registered block")
+            if self.next_weight_binding.block is not self.next_block:
+                raise ValueError("DLO next session binding does not match the prefetch block")
+            # The integration binder owns all target discovery and rebinding.
+            self.block_parameters = {}
+            self.block_buffers = {}
+        else:
+            self.block_parameters = block_parameters
+            self.block_buffers = block_buffers
 
-        self.next_block_parameters = dict(self.next_block.named_parameters())
-        self.next_block_buffers = dict(self.next_block.named_buffers())
-
+        if self._uses_weight_session:
+            self.next_block_parameters = {}
+            self.next_block_buffers = {}
+            self.metadata = {}
+        else:
+            self.next_block_parameters = dict(self.next_block.named_parameters())
+            self.next_block_buffers = dict(self.next_block.named_buffers())
         if self.rank_local_mmap:
             self.cpu_sources, self.metadata = self._collect_mmap_sources(
                 self.next_block_parameters,
                 self.next_block_buffers,
                 self.tensor_transforms,
             )
-        else:
+        elif not self._uses_weight_session:
             # Shard next block's weights and store local shard in pinned CPU memory.
             self.cpu_shards, self.metadata = self._shard_and_pin(
                 self.next_block_parameters,
@@ -200,34 +549,36 @@ class DistributedLayerwiseOffloadHook(ModelHook):
         self._cached_repoint = []
         for slot in range(2):
             repoint = []
-            for dtype, metas in self.metadata.items():
-                for m in metas:
-                    target = (
-                        self.next_block_parameters[m["name"]]
-                        if m["name"] in self.next_block_parameters
-                        else self.next_block_buffers[m["name"]]
-                    )
-                    repoint.append(
-                        (
-                            target,
-                            dtype,
-                            m["offset"],
-                            m["numel"],
-                            m["shape"],
-                            m["stride"],
+            if not self._uses_weight_session:
+                for dtype, metas in self.metadata.items():
+                    for m in metas:
+                        target = (
+                            self.next_block_parameters[m["name"]]
+                            if m["name"] in self.next_block_parameters
+                            else self.next_block_buffers[m["name"]]
                         )
-                    )
+                        repoint.append(
+                            (
+                                target,
+                                dtype,
+                                m["offset"],
+                                m["numel"],
+                                m["shape"],
+                                m["stride"],
+                            )
+                        )
             self._cached_repoint.append(repoint)
 
         # Pre-compute AG output sizes (avoid sum() per layer).
         self._ag_output_sizes: dict[torch.dtype, int] = {}
-        for dtype, metas in self.metadata.items():
-            total_numel = sum(m["numel"] for m in metas)
-            if self.rank_local_mmap:
-                self._ag_output_sizes[dtype] = total_numel
-            else:
-                shard_numel = self.cpu_shards[dtype].numel()
-                self._ag_output_sizes[dtype] = shard_numel * self.dp_size if self.dp_size > 1 else total_numel
+        if not self._uses_weight_session:
+            for dtype, metas in self.metadata.items():
+                total_numel = sum(m["numel"] for m in metas)
+                if self.uses_bounded_host_source:
+                    self._ag_output_sizes[dtype] = total_numel
+                else:
+                    shard_numel = self.cpu_shards[dtype].numel()
+                    self._ag_output_sizes[dtype] = shard_numel * self.dp_size if self.dp_size > 1 else total_numel
 
         return module
 
@@ -436,6 +787,9 @@ class DistributedLayerwiseOffloadHook(ModelHook):
     @property
     def is_materialized(self) -> bool:
         """Check whether this block's parameters hold real data on device."""
+        if self._uses_weight_session:
+            assert self.current_weight_binding is not None
+            return self.current_weight_binding.device_binding is not None
         for param in self.block_parameters.values():
             return is_materialized_tensor(param)
         return True
@@ -499,6 +853,81 @@ class DistributedLayerwiseOffloadHook(ModelHook):
             raise RuntimeError(f"cpu_staging_buffers[{slot}] was not allocated")
         return self._pack_mmap_sources(self.cpu_sources, self.metadata, slot_buffers)
 
+    def _stage_weight_session(self, slot: int) -> dict[Any, torch.Tensor]:
+        """Copy one complete session unit into a bounded shared host slot."""
+        previous_copy = self.cpu_staging_events[slot]
+        if previous_copy is not None:
+            synchronize = getattr(previous_copy, "synchronize", None)
+            if callable(synchronize):
+                synchronize()
+            else:
+                current_omni_platform.synchronize()
+            self.cpu_staging_events[slot] = None
+
+        slot_buffers = self.cpu_staging_buffers[slot]
+        if slot_buffers is None:
+            raise RuntimeError(f"cpu_staging_buffers[{slot}] was not allocated")
+        binding = self.next_weight_binding
+        handle = self.weight_session_handle
+        if binding is None or handle is None:
+            raise RuntimeError("No active host-weight session unit is bound to this hook")
+        session = handle.require()
+
+        offsets: dict[torch.dtype, int] = {}
+        destinations: dict[Any, torch.Tensor] = {}
+        for plane in binding.unit.planes:
+            offset = offsets.get(plane.dtype, 0)
+            destinations[plane.plane_id] = slot_buffers[plane.dtype][offset : offset + plane.storage_numel]
+            offsets[plane.dtype] = offset + plane.storage_numel
+
+        prepared_unit = session.open_unit(UnitReadRequest(unit_id=binding.unit.unit_id))
+        self._pending_weight_reads.append(prepared_unit)
+        try:
+            publish = getattr(prepared_unit, "publish", None)
+            if callable(publish):
+                publish()
+            if prepared_unit.layout != binding.unit:
+                raise RuntimeError(f"open_unit returned the wrong layout for {binding.unit.unit_id!r}")
+            prepared_unit.copy_into(destinations)
+        except BaseException as primary_error:
+            try:
+                prepared_unit.close()
+            except BaseException as cleanup_error:
+                _report_cleanup_failure(
+                    primary_error,
+                    "closing a failed DLO weight read",
+                    cleanup_error,
+                )
+            else:
+                self._pending_weight_reads.remove(prepared_unit)
+            raise
+        try:
+            prepared_unit.close()
+        except BaseException:
+            raise
+        else:
+            self._pending_weight_reads.remove(prepared_unit)
+        return destinations
+
+    def close_pending_weight_reads(self) -> None:
+        first_error: BaseException | None = None
+        for prepared_unit in tuple(self._pending_weight_reads):
+            try:
+                prepared_unit.close()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+                else:
+                    _report_cleanup_failure(
+                        first_error,
+                        "closing another pending DLO weight read",
+                        exc,
+                    )
+            else:
+                self._pending_weight_reads.remove(prepared_unit)
+        if first_error is not None:
+            raise first_error
+
     @torch.compiler.disable
     def prefetch_layer(self, slot: int, non_blocking: bool = True) -> None:
         """Prepare next block's weights into the shared device buffer for *slot*.
@@ -513,15 +942,89 @@ class DistributedLayerwiseOffloadHook(ModelHook):
         gpu_weights = self.gpu_buffers[slot]
         assert gpu_weights is not None, f"gpu_buffers[{slot}] not allocated"
 
+        if self._uses_weight_session:
+            binding = self.next_weight_binding
+            handle = self.weight_session_handle
+            if binding is None or handle is None:
+                raise RuntimeError("DLO hook is missing its active host-weight session")
+            if self.dp_size != 1 or self.dp_group is not None:
+                raise RuntimeError("DLO host-weight sessions are complete-block no-AllGather only")
+            if binding.device_binding is not None:
+                self._prefetched_slot = binding.slot
+                return
+
+            slots = self._session_slot_bindings
+            if slots is None:
+                raise RuntimeError("DLO session slot ownership was not initialized")
+            occupied = slots[slot]
+            if occupied is not None and occupied.device_binding is not None:
+                occupied_group = (
+                    self._shared_slot_group[slot] if self._shared_slot_group is not None else self._group_id
+                )
+                if occupied_group == self._group_id:
+                    raise RuntimeError(
+                        f"DLO attempted to overwrite device slot {slot} before releasing {occupied.unit.unit_id!r}"
+                    )
+                # A cache skip or a different model execution order may enter
+                # another ring while a speculative prefetch from the previous
+                # ring still owns this global slot.  At a group boundary the
+                # compute stream is already ordered after prior consumers;
+                # synchronize the exceptional boundary once, restore the old
+                # block's placeholders, and reuse the bounded slot.
+                current_omni_platform.synchronize()
+                occupied.device_binding.release(ReleaseTarget.PLACEHOLDER)
+                occupied.device_binding = None
+                occupied.device_planes = None
+                occupied.slot = None
+                slots[slot] = None
+
+            cpu_planes = self._stage_weight_session(slot)
+            device_planes: dict[Any, torch.Tensor] = {}
+            offsets: dict[torch.dtype, int] = {}
+            with current_omni_platform.stream(self.copy_stream):
+                for plane in binding.unit.planes:
+                    offset = offsets.get(plane.dtype, 0)
+                    device_plane = gpu_weights[plane.dtype][offset : offset + plane.storage_numel]
+                    host_plane = cpu_planes[plane.plane_id]
+                    device_plane.copy_(
+                        host_plane,
+                        non_blocking=non_blocking and host_plane.is_pinned(),
+                    )
+                    device_planes[plane.plane_id] = device_plane
+                    offsets[plane.dtype] = offset + plane.storage_numel
+                evt.record(self.copy_stream)
+
+            session = handle.require()
+            binding.device_binding = session.bind_device(
+                binding.unit.unit_id,
+                device_planes,
+            )
+            binding.device_planes = MappingProxyType(device_planes)
+            publish = getattr(binding.device_binding, "publish", None)
+            if callable(publish):
+                publish()
+            binding.slot = slot
+            slots[slot] = binding
+            self.cpu_staging_events[slot] = evt
+            self.ready_events[slot] = evt
+            self._prefetch_done = evt
+            self._prefetched_slot = slot
+            if self._shared_slot_group is not None:
+                self._shared_slot_group[slot] = self._group_id
+            return
+
         if self.dp_size <= 1 or self.dp_group is None:
-            cpu_weights = self._stage_mmap_sources(slot) if self.rank_local_mmap else self.cpu_shards
+            if self.rank_local_mmap:
+                cpu_weights = self._stage_mmap_sources(slot)
+            else:
+                cpu_weights = self.cpu_shards
             with current_omni_platform.stream(self.copy_stream):
                 for dtype, cpu_shard in cpu_weights.items():
                     gw = gpu_weights[dtype]
                     async_copy = non_blocking and cpu_shard.is_pinned()
                     gw[: cpu_shard.numel()].copy_(cpu_shard, non_blocking=async_copy)
                 evt.record(self.copy_stream)
-            if self.rank_local_mmap:
+            if self.uses_bounded_host_source:
                 # The CPU slot may be overwritten only after this H2D copy has
                 # finished.  The shared event protects reuse by another hook.
                 self.cpu_staging_events[slot] = evt
@@ -603,6 +1106,21 @@ class DistributedLayerwiseOffloadHook(ModelHook):
             current_omni_platform.current_stream().wait_event(evt)
         self._prefetch_done = None
 
+        if self._uses_weight_session:
+            binding = self.current_weight_binding
+            if binding is not None and binding.device_binding is not None:
+                binding.device_binding.release(ReleaseTarget.PLACEHOLDER)
+                binding.device_binding = None
+                binding.device_planes = None
+                if (
+                    binding.slot is not None
+                    and self._session_slot_bindings is not None
+                    and self._session_slot_bindings[binding.slot] is binding
+                ):
+                    self._session_slot_bindings[binding.slot] = None
+                binding.slot = None
+            return
+
         for _, param in self.block_parameters.items():
             set_tensor_storage(param, make_offload_placeholder(param))
         for _, buf in self.block_buffers.items():
@@ -613,45 +1131,55 @@ class DistributedLayerwiseOffloadHook(ModelHook):
     # ------------------------------------------------------------------ #
 
     def pre_forward(self, module: nn.Module, *args: Any, **kwargs: Any) -> tuple[tuple, dict]:
-        # Dynamic slot tracking: read current_slot from the previous hook's
-        # _prefetched_slot (the slot where this block's data was actually
-        # loaded).  This corrects the initial i%2 assignment for odd block
-        # counts, where the circular tail→head prefetch would otherwise
-        # collide with the head's read slot.
-        if self._prev_hook is not None and self._prev_hook._prefetched_slot is not None:
-            self.current_slot = self._prev_hook._prefetched_slot
+        try:
+            # Dynamic slot tracking: read current_slot from the previous hook's
+            # _prefetched_slot (the slot where this block's data was actually
+            # loaded).  This corrects the initial i%2 assignment for odd block
+            # counts, where the circular tail→head prefetch would otherwise
+            # collide with the head's read slot.
+            if self._prev_hook is not None and self._prev_hook._prefetched_slot is not None:
+                self.current_slot = self._prev_hook._prefetched_slot
 
-        # Group-first hook: check whether the shared buffer slot was
-        # overwritten by another group since our last forward.  If the
-        # slot still contains our own data (from the tail hook's async
-        # prefetch), skip the sync-prefetch and just wait for the event.
-        if self._is_group_first and self._prev_hook is not None:
-            slot_contaminated = True
-            if self._shared_slot_group is not None:
-                slot_contaminated = self._shared_slot_group[self.current_slot] != self._group_id
-            if slot_contaminated:
-                # Another group (or no group) wrote to our slot — re-fetch
+            # Group-first hook: check whether the shared buffer slot was
+            # overwritten by another group since our last forward.  If the
+            # slot still contains our own data (from the tail hook's async
+            # prefetch), skip the sync-prefetch and just wait for the event.
+            if self._is_group_first and self._prev_hook is not None:
+                slot_contaminated = True
+                if self._shared_slot_group is not None:
+                    slot_contaminated = self._shared_slot_group[self.current_slot] != self._group_id
+                if slot_contaminated:
+                    # Another group (or no group) wrote to our slot — re-fetch
+                    self._prev_hook.prefetch_layer(self.current_slot, non_blocking=False)
+                # Always wait for data to be ready (handles both sync and async paths)
+                self._prev_hook.get_weights(self.current_slot)
+            elif not self.is_materialized and self._prev_hook is not None:
+                # Previous hook was skipped (e.g. by cache-dit), sync-prefetch
                 self._prev_hook.prefetch_layer(self.current_slot, non_blocking=False)
-            # Always wait for data to be ready (handles both sync and async paths)
-            self._prev_hook.get_weights(self.current_slot)
-        elif not self.is_materialized and self._prev_hook is not None:
-            # Previous hook was skipped (e.g. by cache-dit), sync-prefetch
-            self._prev_hook.prefetch_layer(self.current_slot, non_blocking=False)
-            self._prev_hook.get_weights(self.current_slot)
+                self._prev_hook.get_weights(self.current_slot)
 
-        # Prefetch next layer into the other slot (overlapped with compute).
-        # No explicit get_weights() here — offload_layer() in the previous
-        # hook's post_forward already enqueued wait_event for the current
-        # layer's H2D/AllGather, which is sufficient to ensure compute_stream
-        # waits for weights before reading them.  The redundant wait_event
-        # caused cascading NPU stream synchronization stalls (~10ms/layer).
-        next_slot = 1 - self.current_slot
-        self.prefetch_layer(next_slot, non_blocking=True)
+            # Prefetch next layer into the other slot (overlapped with compute).
+            # No explicit get_weights() here — offload_layer() in the previous
+            # hook's post_forward already enqueued wait_event for the current
+            # layer's H2D/AllGather, which is sufficient to ensure compute_stream
+            # waits for weights before reading them.  The redundant wait_event
+            # caused cascading NPU stream synchronization stalls (~10ms/layer).
+            next_slot = 1 - self.current_slot
+            self.prefetch_layer(next_slot, non_blocking=True)
+        except BaseException as primary_error:
+            if self._uses_weight_session and self.weight_session_handle is not None:
+                self.weight_session_handle.fail_closed(primary_error)
+            raise
 
         return args, kwargs
 
     def post_forward(self, module: nn.Module, output: Any) -> Any:
-        self.offload_layer()
+        try:
+            self.offload_layer()
+        except BaseException as primary_error:
+            if self._uses_weight_session and self.weight_session_handle is not None:
+                self.weight_session_handle.fail_closed(primary_error)
+            raise
         return output
 
 
@@ -673,6 +1201,9 @@ def apply_distributed_block_hook(
     shared_buffers: list[dict[torch.dtype, torch.Tensor] | None] | None = None,
     rank_local_mmap: bool = False,
     tensor_transforms: dict[int, Any] | None = None,
+    current_weight_binding: _SessionBlockBinding | None = None,
+    next_weight_binding: _SessionBlockBinding | None = None,
+    weight_session_handle: _WeightSessionHandle | None = None,
 ) -> DistributedLayerwiseOffloadHook:
     """Register a DistributedLayerwiseOffloadHook on *module*."""
     registry = HookRegistry.get_or_create(module)
@@ -688,6 +1219,9 @@ def apply_distributed_block_hook(
         shared_buffers=shared_buffers,
         rank_local_mmap=rank_local_mmap,
         tensor_transforms=tensor_transforms,
+        current_weight_binding=current_weight_binding,
+        next_weight_binding=next_weight_binding,
+        weight_session_handle=weight_session_handle,
     )
     registry.register_hook(DistributedLayerwiseOffloadHook._HOOK_NAME, hook)
     return hook
@@ -887,13 +1421,22 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         config: OffloadConfig,
         device: torch.device,
         host_weight_plan: HostWeightPlan | None = None,
+        prepared_weight_session: PreparedWeightAccessSession | None = None,
     ):
         super().__init__(config, device)
+
+        if prepared_weight_session is not None and config.dlo_use_allgather:
+            raise ValueError("PreparedWeightAccessSession is supported only by DLO no-AllGather mode")
+        if prepared_weight_session is not None and host_weight_plan is not None:
+            raise ValueError("DLO accepts either PreparedWeightAccessSession or HostWeightPlan, not both")
 
         self.copy_stream = current_omni_platform.Stream()
         self.comm_stream = current_omni_platform.Stream()
         self.dp_group: torch.distributed.ProcessGroup | None = None
-        self.dp_size = config.dp_size
+        # no-AllGather ranks are independent consumers even when the runtime
+        # has DP/SP groups. Never let an injected source enter the collective
+        # branch merely because a caller constructed OffloadConfig directly.
+        self.dp_size = 1 if prepared_weight_session is not None else config.dp_size
         self.rank = 0
         self._blocks: list[list[nn.Module]] = []
         self._all_hook_groups: list[list[DistributedLayerwiseOffloadHook]] = []
@@ -903,14 +1446,170 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         self._using_rank_local_mmap = False
         self.host_weight_plan = host_weight_plan
         self._mmap_transforms_by_tensor_id: dict[int, Any] = {}
+        self._prepared_weight_session = prepared_weight_session
+        self._weight_session: WeightAccessSession | None = None
+        self._weight_session_handle = _WeightSessionHandle(fail_closed_callback=self._terminate_weight_session)
+        self._uses_weight_session = prepared_weight_session is not None
+        self._host_weight_terminal = False
+        self._weight_session_teardown_phase = _SessionTeardownPhase.ACTIVE
+        self._weight_session_blocks: dict[int, _SessionBlockBinding] = {}
+        self._session_slot_bindings: list[_SessionBlockBinding | None] = [None, None]
+        self._session_hooked_blocks: list[nn.Module] = []
+        self._resident_weight_controller: _SessionResidentController | None = None
+        self._stage_resident_weight_controller: _SessionResidentController | None = None
+
+    def _preflight_weight_session(
+        self,
+        modules: Any,
+        plan: OffloadPlan | None,
+    ) -> None:
+        """Validate every session-backed block before hook mutation."""
+        prepared = self._prepared_weight_session
+        if prepared is None:
+            return
+        _validate_session_capabilities(prepared)
+        if len(modules.dits) != 1:
+            raise ValueError("v1 DLO host-weight offload requires exactly one managed DiT target")
+        managed_target = modules.dits[0]
+
+        streamed_blocks: list[nn.Module] = []
+        stage_resident_blocks: list[nn.Module] = []
+        for dit_name, dit_module in zip(modules.dit_names, modules.dits, strict=True):
+            _, blocks = get_blocks_from_dit(dit_module)
+            resident_count = 0
+            if plan is not None and dit_name in plan.resident_dit_paths:
+                resident_count = min(self.config.dlo_resident_layers, len(blocks))
+            stage_resident_blocks.extend(blocks[:resident_count])
+            tail = blocks[resident_count:]
+            if len(tail) > 1:
+                streamed_blocks.extend(tail)
+            else:
+                stage_resident_blocks.extend(tail)
+            if plan is not None:
+                for child_name, blocks_attr in sorted(plan.offload_submodules.items()):
+                    child = getattr(dit_module, child_name, None)
+                    if not isinstance(child, nn.Module):
+                        continue
+                    try:
+                        auxiliary_blocks = attrgetter(blocks_attr)(child)
+                    except AttributeError as exc:
+                        raise ValueError(
+                            f"OffloadPlan path {dit_name}.{child_name}.{blocks_attr} does not exist"
+                        ) from exc
+                    if not isinstance(auxiliary_blocks, nn.ModuleList):
+                        raise ValueError(
+                            f"OffloadPlan path {dit_name}.{child_name}.{blocks_attr} is not an nn.ModuleList"
+                        )
+                    if len(auxiliary_blocks) > 1:
+                        streamed_blocks.extend(auxiliary_blocks)
+                    else:
+                        stage_resident_blocks.extend(auxiliary_blocks)
+
+        if not streamed_blocks:
+            raise ValueError("PreparedWeightAccessSession was provided, but DLO discovered no streamable block ring")
+        all_blocks = [*streamed_blocks, *stage_resident_blocks]
+        if len({id(block) for block in all_blocks}) != len(all_blocks):
+            raise ValueError("PreparedWeightAccessSession cannot bind a block in more than one DLO ring")
+
+        block_by_id = {id(block): block for block in all_blocks}
+        unit_by_block_id: dict[int, tuple[str, Any]] = {}
+        resolved_execution_ids: set[int] = set()
+        for execution in prepared.transfer_plan.execution_bindings:
+            unit = prepared.unit_spec(execution.unit_id)
+            if _enum_value(unit.unit_kind) != UnitKind.BLOCK.value:
+                raise ValueError(f"DLO execution binding selects non-block unit {unit.unit_id!r}")
+            execution_module = _resolve_execution_module(managed_target, execution.module_path)
+            module_id = id(execution_module)
+            if module_id in resolved_execution_ids:
+                raise ValueError("selected DLO transfer plan binds the same target module more than once")
+            resolved_execution_ids.add(module_id)
+            if module_id not in block_by_id:
+                raise ValueError(f"DLO execution binding {str(execution.module_path)!r} is not a declared DLO block")
+            unit_by_block_id[module_id] = (str(execution.module_path), unit)
+
+        session_blocks: dict[int, _SessionBlockBinding] = {}
+        state_by_block_id: dict[int, _SessionBlockBinding] = {}
+        streamed_block_ids = {id(block) for block in streamed_blocks}
+        for block in all_blocks:
+            selected = unit_by_block_id.get(id(block))
+            if selected is None:
+                raise ValueError("selected DLO transfer plan has no execution binding for a declared block")
+            block_path, unit = selected
+            if not unit.planes or not unit.bindings:
+                raise ValueError(f"DLO transfer unit {unit.unit_id!r} is empty")
+            state = _SessionBlockBinding(
+                block_path=block_path,
+                block=block,
+                unit=unit,
+            )
+            state_by_block_id[id(block)] = state
+            if id(block) in streamed_block_ids:
+                session_blocks[id(block)] = state
+
+        self._weight_session_blocks = session_blocks
+        stage_units = [state_by_block_id[id(block)].unit for block in stage_resident_blocks]
+        resident_units = []
+        for unit_id in prepared.transfer_plan.unit_ids:
+            unit = prepared.unit_spec(unit_id)
+            if _enum_value(unit.unit_kind) == UnitKind.RESIDENT.value:
+                resident_units.append(unit)
+        if resident_units:
+            supported = {_enum_value(kind) for kind in prepared.capabilities.unit_kinds}
+            if UnitKind.RESIDENT.value not in supported:
+                raise ValueError("DLO catalog declares resident units but the session does not support them")
+            self._resident_weight_controller = _SessionResidentController(
+                resident_units,
+                device=self.device,
+                pin_memory=self.config.pin_cpu_memory,
+            )
+        if stage_units:
+            self._stage_resident_weight_controller = _SessionResidentController(
+                stage_units,
+                device=self.device,
+                pin_memory=self.config.pin_cpu_memory,
+            )
+
+    def _rollback_prepared_weight_session(self) -> None:
+        prepared = self._prepared_weight_session
+        if prepared is None:
+            return
+        prepared.rollback()
+        if self._prepared_weight_session is prepared:
+            self._prepared_weight_session = None
+
+    def _adopt_committed_weight_session(self) -> None:
+        prepared = self._prepared_weight_session
+        session = self._weight_session
+        if prepared is None or session is None:
+            return
+        prepared.adopt(session)
+        if self._prepared_weight_session is prepared:
+            self._prepared_weight_session = None
 
     def load_resident_layers(self) -> None:
         """Load the model-declared leading blocks for the denoise stage."""
+        if self._stage_resident_weight_controller is not None:
+            session = self._weight_session
+            if session is None:
+                raise RuntimeError("DLO host-weight session is not active")
+            try:
+                self._stage_resident_weight_controller.load(session)
+            except BaseException as primary_error:
+                self._weight_session_handle.fail_closed(primary_error)
+                raise
+            return
         if self._resident_layer_group is not None:
             self._resident_layer_group.load()
 
     def offload_resident_layers(self) -> None:
         """Release leading blocks before VAE decode to bound peak HBM."""
+        if self._stage_resident_weight_controller is not None:
+            try:
+                self._stage_resident_weight_controller.release()
+            except BaseException as primary_error:
+                self._weight_session_handle.fail_closed(primary_error)
+                raise
+            return
         if self._resident_layer_group is not None:
             self._resident_layer_group.offload()
 
@@ -1229,8 +1928,6 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
 
         Returns True if layerwise offload was applied, False otherwise.
         """
-        from operator import attrgetter
-
         blocks = None
         blocks_attr = None
 
@@ -1275,10 +1972,17 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
             self.dp_size,
         )
 
-        # Move non-block parts of the submodule to GPU (small: embeddings, norms)
-        for child_name, child in module.named_children():
-            if child_name != blocks_attr:
-                child.to(self.device)
+        if self._uses_weight_session:
+            missing = [index for index, block in enumerate(blocks) if id(block) not in self._weight_session_blocks]
+            if missing:
+                raise ValueError(f"DLO host-weight session has no units for {name}.{blocks_attr} blocks {missing}")
+            # Non-block state is covered by the artifact's resident unit and
+            # remains meta until that unit is bound after session commit.
+        else:
+            # Move non-block parts of the submodule to GPU (small: embeddings, norms)
+            for child_name, child in module.named_children():
+                if child_name != blocks_attr:
+                    child.to(self.device)
 
         # Apply distributed hooks (1/4 sharding + AllGather, same as DiT)
         # Pass shared_buffers=[None,None] to defer per-hook allocation
@@ -1297,7 +2001,12 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
             shared_buffers=[None, None],
             rank_local_mmap=self._using_rank_local_mmap,
             tensor_transforms=self._mmap_transforms_by_tensor_id,
+            current_weight_binding=(self._weight_session_blocks[id(last_block)] if self._uses_weight_session else None),
+            next_weight_binding=(self._weight_session_blocks[id(first_block)] if self._uses_weight_session else None),
+            weight_session_handle=(self._weight_session_handle if self._uses_weight_session else None),
         )
+        if self._uses_weight_session:
+            self._session_hooked_blocks.append(last_block)
         sub_hooks = [last_hook]
         for i, block in enumerate(blocks[:-1]):
             next_block = blocks[(i + 1) % num_blocks]
@@ -1314,7 +2023,14 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
                 shared_buffers=[None, None],
                 rank_local_mmap=self._using_rank_local_mmap,
                 tensor_transforms=self._mmap_transforms_by_tensor_id,
+                current_weight_binding=(self._weight_session_blocks[id(block)] if self._uses_weight_session else None),
+                next_weight_binding=(
+                    self._weight_session_blocks[id(next_block)] if self._uses_weight_session else None
+                ),
+                weight_session_handle=(self._weight_session_handle if self._uses_weight_session else None),
             )
+            if self._uses_weight_session:
+                self._session_hooked_blocks.append(block)
             sub_hooks.append(hook)
 
         # Wire backward references + slot alternation
@@ -1364,6 +2080,16 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
                 / 1048576
             )
             explicitly_planned = plan is not None and name in plan.offload_submodules
+            if self._uses_weight_session:
+                if explicitly_planned:
+                    self._try_layerwise_offload_submodule(module, name, plan)
+                else:
+                    logger.debug(
+                        "Leaving %s.%s as structural placeholders until its resident unit is bound",
+                        dit_name,
+                        name,
+                    )
+                continue
             if explicitly_planned or module_mb > _ON_DEMAND_THRESHOLD:
                 if id(module) in all_dit_modules:
                     logger.info("Submodule '%s' is already a DiT module, skipping layerwise offload", name)
@@ -1405,6 +2131,33 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
                 buffer.data = buffer.data.to(self.device, non_blocking=True)
 
     def enable(self, pipeline: nn.Module) -> None:
+        try:
+            self._enable_impl(pipeline)
+        except BaseException as primary_error:
+            if self._uses_weight_session:
+                cleanup_errors: list[tuple[str, BaseException]] = []
+                try:
+                    self._adopt_committed_weight_session()
+                except BaseException as cleanup_error:
+                    cleanup_errors.append(("active-session adoption", cleanup_error))
+                if self._weight_session is None:
+                    try:
+                        self._rollback_prepared_weight_session()
+                    except BaseException as cleanup_error:
+                        cleanup_errors.append(("prepared-session rollback", cleanup_error))
+                try:
+                    self._terminate_weight_session()
+                except BaseException as cleanup_error:
+                    cleanup_errors.append(("terminal teardown", cleanup_error))
+                for action, cleanup_error in cleanup_errors:
+                    _report_cleanup_failure(
+                        primary_error,
+                        f"DLO host-weight {action}",
+                        cleanup_error,
+                    )
+            raise
+
+    def _enable_impl(self, pipeline: nn.Module) -> None:
         if self.enabled:
             logger.warning("DistributedLayerwiseOffloadBackend already enabled")
             return
@@ -1418,6 +2171,8 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
 
         modules = ModuleDiscovery.discover(pipeline)
         if not modules.dits:
+            if self._uses_weight_session:
+                raise RuntimeError("DLO received PreparedWeightAccessSession, but no DiT modules were discovered")
             if self.host_weight_plan is not None:
                 raise RuntimeError(
                     "DLO received a loader-owned host-weight plan, but no DiT modules were discovered to consume it"
@@ -1436,13 +2191,21 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
                 self.config.dlo_resident_layers,
             )
 
+        if self._uses_weight_session:
+            self._preflight_weight_session(modules, plan)
+
         # Storage selection belongs to the loader.  DLO consumes the exact
         # prevalidated plan that caused the loader to skip materialization;
         # without a plan, all weights must already come from the ordinary
         # loader.  The transfer protocol is selected independently below.
         self._using_mmap = self.host_weight_plan is not None
         self._using_rank_local_mmap = self._using_mmap and self.dp_size <= 1
-        if self._using_mmap:
+        if self._uses_weight_session:
+            logger.info(
+                "DLO no-AllGather host-weight session enabled: every streamed block uses "
+                "two bounded host staging slots and H2D-only transfer"
+            )
+        elif self._using_mmap:
             if self.host_weight_plan.backing_kind != "checkpoint_mmap":
                 raise ValueError(f"Unsupported DLO host-weight backing: {self.host_weight_plan.backing_kind}")
             self._load_weights_via_mmap(
@@ -1571,7 +2334,16 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
                 shared_buffers=[None, None],
                 rank_local_mmap=self._using_rank_local_mmap,
                 tensor_transforms=self._mmap_transforms_by_tensor_id,
+                current_weight_binding=(
+                    self._weight_session_blocks[id(last_block)] if self._uses_weight_session else None
+                ),
+                next_weight_binding=(
+                    self._weight_session_blocks[id(first_block)] if self._uses_weight_session else None
+                ),
+                weight_session_handle=(self._weight_session_handle if self._uses_weight_session else None),
             )
+            if self._uses_weight_session:
+                self._session_hooked_blocks.append(last_block)
 
             block_hooks: list[DistributedLayerwiseOffloadHook] = [last_hook]
             for i, block in enumerate(blocks[:-1]):
@@ -1589,7 +2361,16 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
                     shared_buffers=[None, None],
                     rank_local_mmap=self._using_rank_local_mmap,
                     tensor_transforms=self._mmap_transforms_by_tensor_id,
+                    current_weight_binding=(
+                        self._weight_session_blocks[id(block)] if self._uses_weight_session else None
+                    ),
+                    next_weight_binding=(
+                        self._weight_session_blocks[id(next_block)] if self._uses_weight_session else None
+                    ),
+                    weight_session_handle=(self._weight_session_handle if self._uses_weight_session else None),
                 )
+                if self._uses_weight_session:
+                    self._session_hooked_blocks.append(block)
                 block_hooks.append(hook)
 
             # Wire backward references for cache-dit fallback
@@ -1612,15 +2393,16 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
             self._blocks.append(blocks)
 
         if self._resident_blocks:
-            self._resident_layer_group = PinnedResidentLayerGroup(
-                self._resident_blocks,
-                self.device,
-                self.copy_stream,
-                self.config.pin_cpu_memory,
-                rank_local_mmap=self._using_rank_local_mmap,
-                defer_staging=bool(self._all_hook_groups),
-                tensor_transforms=self._mmap_transforms_by_tensor_id,
-            )
+            if not self._uses_weight_session:
+                self._resident_layer_group = PinnedResidentLayerGroup(
+                    self._resident_blocks,
+                    self.device,
+                    self.copy_stream,
+                    self.config.pin_cpu_memory,
+                    rank_local_mmap=self._using_rank_local_mmap,
+                    defer_staging=bool(self._all_hook_groups),
+                    tensor_transforms=self._mmap_transforms_by_tensor_id,
+                )
             pipeline._dlo_residency_controller = self
 
         if not self._all_hook_groups:
@@ -1642,10 +2424,10 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
             unified_shard_buffers = self._allocate_shared_shard_buffers(all_hooks)
         unified_cpu_staging = None
         cpu_staging_events = None
-        if self._using_rank_local_mmap:
+        if any(hook.uses_bounded_host_source for hook in all_hooks):
             unified_cpu_staging = self._allocate_shared_cpu_staging_buffers(
                 all_hooks,
-                self._resident_layer_group,
+                self._resident_layer_group if self._using_rank_local_mmap else None,
             )
             cpu_staging_events = [None, None]
             if self._resident_layer_group is not None:
@@ -1667,25 +2449,35 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
                 hook._owns_buffers = False
                 if unified_shard_buffers is not None:
                     hook.gpu_shard_buffers = unified_shard_buffers
-                if unified_cpu_staging is not None and cpu_staging_events is not None:
+                if hook.uses_bounded_host_source and unified_cpu_staging is not None and cpu_staging_events is not None:
                     hook.cpu_staging_buffers = unified_cpu_staging
                     hook.cpu_staging_events = cpu_staging_events
+                if hook._uses_weight_session:
+                    hook._session_slot_bindings = self._session_slot_bindings
                 hook._group_id = group_idx
                 hook._shared_slot_group = shared_slot_group
 
-        # Prefetch first block of the FIRST module group only.
-        # Subsequent groups share the same 2 device buffers; prefetching
-        # them now would overwrite the first group's data in the shared
-        # buffer (both groups default to slot 0).  Instead, subsequent
-        # groups' first blocks remain as meta placeholders, and their
-        # pre_forward will sync-prefetch on-demand via the is_materialized
-        # check — by which point the first group's forward has completed
-        # and its buffer slots are free.
+        if self._uses_weight_session:
+            prepared = self._prepared_weight_session
+            if prepared is None:
+                raise RuntimeError("prepared DLO host-weight session was already consumed")
+            self._weight_session = prepared.commit()
+            self._adopt_committed_weight_session()
+            self._weight_session_handle.session = self._weight_session
+            if self._resident_weight_controller is not None:
+                self._resident_weight_controller.load(self._weight_session)
+
+        # Legacy sources prefetch the first block of the first module group.
+        # A host-weight session deliberately starts with no transient block
+        # binding: the group-first pre-forward hook performs the synchronous
+        # first fill on demand.  This makes the PRE_RESOLVE/idle boundary
+        # observable without weakening the steady-state two-slot ring.
         if self._all_hook_groups:
             group = self._all_hook_groups[0]
-            first_slot = group[0].current_slot
-            group[-1].prefetch_layer(slot=first_slot, non_blocking=False)
-            group[-1].get_weights(first_slot)
+            if not self._uses_weight_session:
+                first_slot = group[0].current_slot
+                group[-1].prefetch_layer(slot=first_slot, non_blocking=False)
+                group[-1].get_weights(first_slot)
 
         total_blocks = sum(len(b) for b in self._blocks)
         logger.info(
@@ -1742,7 +2534,144 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         except Exception:
             pass
 
+    def _terminate_weight_session(self) -> None:
+        self._host_weight_terminal = True
+
+        if self._weight_session_teardown_phase is _SessionTeardownPhase.ACTIVE:
+            first_error: BaseException | None = None
+            for hook_group in self._all_hook_groups:
+                for hook in hook_group:
+                    try:
+                        hook.close_pending_weight_reads()
+                    except BaseException as exc:
+                        if first_error is None:
+                            first_error = exc
+                        else:
+                            _report_cleanup_failure(
+                                first_error,
+                                "closing another DLO hook weight read",
+                                exc,
+                            )
+            synchronized = False
+            try:
+                current_omni_platform.synchronize()
+                synchronized = True
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+                else:
+                    _report_cleanup_failure(
+                        first_error,
+                        "synchronizing DLO terminal teardown",
+                        exc,
+                    )
+            if not synchronized:
+                assert first_error is not None
+                raise first_error
+
+            for binding in self._weight_session_blocks.values():
+                if binding.device_binding is not None:
+                    try:
+                        binding.device_binding.release(ReleaseTarget.PLACEHOLDER)
+                    except BaseException as exc:
+                        if first_error is None:
+                            first_error = exc
+                        else:
+                            _report_cleanup_failure(
+                                first_error,
+                                "releasing another DLO device binding",
+                                exc,
+                            )
+                    else:
+                        binding.device_binding = None
+                        binding.device_planes = None
+                        if binding.slot is not None and self._session_slot_bindings[binding.slot] is binding:
+                            self._session_slot_bindings[binding.slot] = None
+                        binding.slot = None
+
+            if self._resident_weight_controller is not None:
+                try:
+                    self._resident_weight_controller.release()
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+                    else:
+                        _report_cleanup_failure(
+                            first_error,
+                            "releasing DLO resident weights",
+                            exc,
+                        )
+            if self._stage_resident_weight_controller is not None:
+                try:
+                    self._stage_resident_weight_controller.release()
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+                    else:
+                        _report_cleanup_failure(
+                            first_error,
+                            "releasing DLO stage-resident weights",
+                            exc,
+                        )
+
+            # Suspending with a binding whose release failed would only raise a
+            # secondary "session is busy" error.  Keep the active session, hooks,
+            # slot ownership, and failed binding for a later disable() retry.
+            if first_error is not None:
+                raise first_error
+            self._session_slot_bindings[:] = [None, None]
+
+            session = self._weight_session
+            if session is not None:
+                # Cross the strict session boundary exactly once.  Later hook
+                # or handle-removal retries resume from the quiesced phase.
+                session.suspend()
+            self._weight_session_teardown_phase = _SessionTeardownPhase.QUIESCED
+
+        while self._session_hooked_blocks:
+            block = self._session_hooked_blocks[0]
+            remove_distributed_block_hook(block)
+            del self._session_hooked_blocks[0]
+
+        handles = getattr(self, "_on_demand_handles", [])
+        while handles:
+            handles[0].remove()
+            del handles[0]
+        self._on_demand_shard_infos = []
+
+        session = self._weight_session
+        if session is not None:
+            session.close(DetachMode.TERMINAL)
+
+        if self._resident_weight_controller is not None:
+            self._resident_weight_controller.close()
+            self._resident_weight_controller = None
+        if self._stage_resident_weight_controller is not None:
+            self._stage_resident_weight_controller.close()
+            self._stage_resident_weight_controller = None
+        self._blocks.clear()
+        self._all_hook_groups.clear()
+        self._resident_blocks.clear()
+        self._resident_layer_group = None
+        self._session_hooked_blocks.clear()
+        self._weight_session_blocks.clear()
+        self._weight_session_handle.session = None
+        self._weight_session = None
+        self._using_mmap = False
+        self._using_rank_local_mmap = False
+        self.enabled = False
+        self._weight_session_teardown_phase = _SessionTeardownPhase.CLOSED
+
     def disable(self) -> None:
+        if self._uses_weight_session:
+            if self._prepared_weight_session is not None:
+                self._rollback_prepared_weight_session()
+            if self._weight_session_teardown_phase is _SessionTeardownPhase.CLOSED:
+                return
+            self._terminate_weight_session()
+            logger.info("Distributed layer-wise host-weight offloading disabled")
+            return
+
         if not self.enabled and not hasattr(self, "_mmap_file_cache"):
             return
 
@@ -1769,6 +2698,35 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         self.enabled = False
         logger.info("Distributed layer-wise offloading disabled")
 
+    def host_weight_diagnostics(self) -> dict[str, object]:
+        """Return deduplicated pinned staging bytes and in-flight events."""
+
+        tensors: list[torch.Tensor] = []
+        events: list[Any | None] = []
+        for hook_group in self._all_hook_groups:
+            for hook in hook_group:
+                for slot in hook.cpu_staging_buffers:
+                    if slot is not None:
+                        tensors.extend(slot.values())
+                events.extend(hook.cpu_staging_events)
+                events.extend(hook.ready_events)
+                events.append(hook._prefetch_done)
+        for controller in (
+            self._resident_weight_controller,
+            self._stage_resident_weight_controller,
+        ):
+            if controller is not None:
+                tensors.extend(controller.staging.values())
+        resident_group = self._resident_layer_group
+        if resident_group is not None:
+            for slot in resident_group._cpu_staging_buffers:
+                tensors.extend(slot.values())
+            events.extend(resident_group._cpu_staging_events)
+        return {
+            "pinned_slot_budget_bytes": _pinned_cpu_storage_bytes(tensors),
+            "events": _incomplete_event_count(events),
+        }
+
     @staticmethod
     def _allocate_shared_buffers(
         hooks: list[DistributedLayerwiseOffloadHook],
@@ -1782,14 +2740,22 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         """
         max_sizes: dict[torch.dtype, int] = {}
         for hook in hooks:
-            dp = hook.dp_size
-            for dtype, metas in hook.metadata.items():
-                total = sum(m["numel"] for m in metas)
-                # AllGather output = dp * ceil(total/dp) (padded for equal shards)
-                if dp > 1:
-                    total = ((total + dp - 1) // dp) * dp
-                if dtype not in max_sizes or total > max_sizes[dtype]:
-                    max_sizes[dtype] = total
+            if hook._uses_weight_session:
+                assert hook.next_weight_binding is not None
+                totals: dict[torch.dtype, int] = {}
+                for plane in hook.next_weight_binding.unit.planes:
+                    totals[plane.dtype] = totals.get(plane.dtype, 0) + plane.storage_numel
+                for dtype, total in totals.items():
+                    max_sizes[dtype] = max(max_sizes.get(dtype, 0), total)
+            else:
+                dp = hook.dp_size
+                for dtype, metas in hook.metadata.items():
+                    total = sum(m["numel"] for m in metas)
+                    # AllGather output = dp * ceil(total/dp) (padded for equal shards)
+                    if dp > 1:
+                        total = ((total + dp - 1) // dp) * dp
+                    if dtype not in max_sizes or total > max_sizes[dtype]:
+                        max_sizes[dtype] = total
 
         device = hooks[0].device
         shared_buffers: list[dict[torch.dtype, torch.Tensor] | None] = [None, None]
@@ -1810,19 +2776,30 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         hooks: list[DistributedLayerwiseOffloadHook],
         resident_group: PinnedResidentLayerGroup | None = None,
     ) -> list[dict[torch.dtype, torch.Tensor] | None]:
-        """Allocate two bounded host slots for rank-local mmap -> device copies."""
+        """Allocate two bounded host slots for immutable source -> device copies."""
         max_sizes: dict[torch.dtype, int] = {}
-        for hook in hooks:
-            for dtype, metas in hook.metadata.items():
-                total = sum(meta["numel"] for meta in metas)
-                max_sizes[dtype] = max(max_sizes.get(dtype, 0), total)
+        bounded_hooks = [hook for hook in hooks if hook.uses_bounded_host_source]
+        for hook in bounded_hooks:
+            if hook._uses_weight_session:
+                assert hook.next_weight_binding is not None
+                totals: dict[torch.dtype, int] = {}
+                for plane in hook.next_weight_binding.unit.planes:
+                    totals[plane.dtype] = totals.get(plane.dtype, 0) + plane.storage_numel
+                for dtype, total in totals.items():
+                    max_sizes[dtype] = max(max_sizes.get(dtype, 0), total)
+            else:
+                for dtype, metas in hook.metadata.items():
+                    total = sum(meta["numel"] for meta in metas)
+                    max_sizes[dtype] = max(max_sizes.get(dtype, 0), total)
         if resident_group is not None:
             for state in resident_group._states:
                 for dtype, metas in state["metadata"].items():
                     total = sum(meta["numel"] for meta in metas)
                     max_sizes[dtype] = max(max_sizes.get(dtype, 0), total)
 
-        pin_memory = hooks[0].pin_memory if hooks else bool(resident_group and resident_group.pin_memory)
+        pin_memory = (
+            bounded_hooks[0].pin_memory if bounded_hooks else bool(resident_group and resident_group.pin_memory)
+        )
         shared_staging: list[dict[torch.dtype, torch.Tensor] | None] = [None, None]
         for slot in range(2):
             buffers: dict[torch.dtype, torch.Tensor] = {}
@@ -1834,7 +2811,7 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
             shared_staging[slot] = buffers
 
         logger.info(
-            "Allocated 2 shared host staging buffers for rank-local mmap (max block size: %s, pinned=%s)",
+            "Allocated 2 shared host staging buffers (max block size: %s, pinned=%s)",
             {str(k): f"{v * _dtype_size(k) / 1024 / 1024:.1f}MB" for k, v in max_sizes.items()},
             pin_memory,
         )

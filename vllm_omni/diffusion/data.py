@@ -753,6 +753,18 @@ class OmniDiffusionConfig:
     # Leading main-DiT blocks kept resident by distributed layerwise offload.
     dlo_resident_layers: int = 0
 
+    # Optional independent Host Weight Runtime. ``read_only`` consumes an
+    # existing artifact and falls back on a miss; ``read_write`` may publish a
+    # normalized artifact. The feature remains opt-in while its model/offloader
+    # support matrix is being qualified.
+    host_weight_runtime_mode: str = "disabled"
+    host_weight_runtime_root: str | None = None
+    # When true, an optional pre-bind fallback is promoted by the loader to a
+    # startup failure instead of selecting the legacy weight path.
+    host_weight_runtime_required: bool = False
+    # Maximum time a resolver waits for another process's active publication.
+    host_weight_runtime_wait_timeout_s: float = 120.0
+
     pin_cpu_memory: bool = True  # Use pinned memory for faster transfers when offloading
 
     # VAE memory optimization parameters
@@ -978,6 +990,15 @@ class OmniDiffusionConfig:
         )
 
     def __post_init__(self):
+        if self.host_weight_runtime_mode not in {"disabled", "read_only", "read_write"}:
+            raise ValueError(
+                "host_weight_runtime_mode must be 'disabled', 'read_only', or "
+                f"'read_write', got {self.host_weight_runtime_mode!r}"
+            )
+        if self.host_weight_runtime_mode != "disabled" and not self.host_weight_runtime_root:
+            raise ValueError("host_weight_runtime_root is required when Host Weight Runtime is enabled")
+        if not math.isfinite(self.host_weight_runtime_wait_timeout_s) or self.host_weight_runtime_wait_timeout_s <= 0:
+            raise ValueError("host_weight_runtime_wait_timeout_s must be finite and positive")
         if self.diffusion_compile_granularity not in {"regional", "full"}:
             raise ValueError(
                 "diffusion_compile_granularity must be 'regional' or 'full', "

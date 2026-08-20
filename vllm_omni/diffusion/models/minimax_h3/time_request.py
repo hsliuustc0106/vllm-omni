@@ -56,8 +56,8 @@ def _time_shift_sigmas(
 
     import torch
 
-    if num_steps <= 0:
-        raise ValueError("MiniMax H3 num_steps must be > 0")
+    if num_steps < 2:
+        raise ValueError("MiniMax H3 num_steps must be >= 2")
 
     # The rectified-flow sigma range is fixed at [1.0, 0.0].
     base = torch.linspace(
@@ -69,10 +69,7 @@ def _time_shift_sigmas(
     )
     shifted = float(shift_scale) * base / (1 + (float(shift_scale) - 1) * base)
     shifted, _ = torch.unique_consecutive(shifted, return_counts=True)
-    # A one-point request is still exactly one point.  Normal serving uses
-    # multiple points, but preserving the requested cardinality keeps
-    # ``num_inference_steps`` the sole schedule-size control.
-    if num_steps > 1 and shifted[-1].item() > 0.0:
+    if shifted[-1].item() > 0.0:
         shifted = torch.cat([shifted, torch.tensor([0.0], dtype=shifted.dtype)])
     return [float(value) for value in shifted.tolist()]
 

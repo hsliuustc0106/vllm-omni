@@ -572,6 +572,7 @@ class MiniMaxH3Pipeline(
         *,
         od_config: OmniDiffusionConfig,
         prefix: str = "",
+        transformer_override: MiniMaxH3DiTModel | None = None,
     ) -> None:
         del prefix
         super().__init__()
@@ -649,10 +650,19 @@ class MiniMaxH3Pipeline(
             od_config.quantization_config,
             "transformer",
         )
-        self.transformer = MiniMaxH3DiTModel(
-            od_config,
-            quant_config=transformer_quant_config,
-        )
+        if transformer_override is not None:
+            if self.partition != "fl2va":
+                raise ValueError("a transformer override is supported only for the MiniMax-H3 FL2VA partition")
+            if not isinstance(transformer_override, MiniMaxH3DiTModel):
+                raise TypeError(
+                    f"transformer_override must be MiniMaxH3DiTModel, got {type(transformer_override).__name__}"
+                )
+            self.transformer = transformer_override
+        else:
+            self.transformer = MiniMaxH3DiTModel(
+                od_config,
+                quant_config=transformer_quant_config,
+            )
         if ref2va_model_path is not None:
             self.transformers_ref = MiniMaxH3DiTModel(
                 od_config,

@@ -328,29 +328,58 @@ class DiffusionWorker:
             if getattr(self.od_config, "force_cutlass_fp8", False)
             else nullcontext()
         )
-        with (
-            set_forward_context(vllm_config=self.vllm_config, omni_diffusion_config=self.od_config),
-            set_current_vllm_config(self.vllm_config),
-            cutlass_fp8_context,
-        ):
-            self.model_runner.load_model(
-                memory_pool_context_fn=self._maybe_get_memory_pool_context,
-                load_format=load_format,
-                custom_pipeline_name=custom_pipeline_name,
-            )
-            current_omni_platform.synchronize()
-            gc.collect()
-        process_memory = get_process_gpu_memory(self.local_rank)
-        if process_memory is not None:
-            logger.info(
-                "Worker %d: Process-scoped GPU memory after model loading: %.2f GiB.",
-                self.rank,
-                process_memory / GiB_bytes,
-            )
+        try:
+            with (
+                set_forward_context(vllm_config=self.vllm_config, omni_diffusion_config=self.od_config),
+                set_current_vllm_config(self.vllm_config),
+                cutlass_fp8_context,
+            ):
+                self.model_runner.load_model(
+                    memory_pool_context_fn=self._maybe_get_memory_pool_context,
+                    load_format=load_format,
+                    custom_pipeline_name=custom_pipeline_name,
+                )
+                current_omni_platform.synchronize()
+                gc.collect()
+            process_memory = get_process_gpu_memory(self.local_rank)
+            if process_memory is not None:
+                logger.info(
+                    "Worker %d: Process-scoped GPU memory after model loading: %.2f GiB.",
+                    self.rank,
+                    process_memory / GiB_bytes,
+                )
 
-        # When load_format is "dummy", pipeline will init with custom pipeline later
-        if load_format != "dummy":
-            assert self.model_runner.pipeline is not None
+            # When load_format is "dummy", pipeline will init with custom pipeline later
+            if load_format != "dummy":
+                assert self.model_runner.pipeline is not None
+        except BaseException as primary_error:
+            # Runner startup may already have adopted an HWR session when a
+            # platform synchronization or worker-side accounting step fails.
+            # Shutdown is idempotent and retains every unfinished owner on the
+            # runner when cleanup itself needs a retry.
+            try:
+                self.model_runner.shutdown()
+            except BaseException as cleanup_error:
+                try:
+                    primary_error.add_note(
+                        "Model-runner shutdown after worker load failure also failed: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
+                except BaseException:
+                    pass
+                try:
+                    logger.error(
+                        "Model-runner shutdown failed while preserving %s",
+                        type(primary_error).__name__,
+                        exc_info=(
+                            type(cleanup_error),
+                            cleanup_error,
+                            cleanup_error.__traceback__,
+                        ),
+                    )
+                except BaseException:
+                    pass
+            raise
 
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
         """Return native rank-local specs for every diffusion Worker."""
@@ -359,6 +388,26 @@ class DiffusionWorker:
         return _run_and_gather_rank_values(
             "Diffusion KV cache spec discovery",
             self.model_runner.get_kv_cache_spec,
+        )
+
+    def get_host_weight_runtime_evidence(self) -> list[dict[str, object]]:
+        """Collect JSON-safe HWR resolution evidence from every Worker rank."""
+
+        def local_evidence() -> dict[str, object]:
+            assert self.model_runner is not None
+            evidence = self.model_runner.get_host_weight_runtime_evidence()
+            evidence["rank"] = {
+                "global_rank": int(self.rank),
+                "local_rank": int(self.local_rank),
+                "world_size": int(getattr(self.od_config, "num_gpus", 1)),
+                "stage_id": int(self.stage_id),
+                "pid": os.getpid(),
+            }
+            return evidence
+
+        return _run_and_gather_rank_values(
+            "Host Weight Runtime resolution evidence collection",
+            local_evidence,
         )
 
     def determine_available_kv_memory(self, profile_requests: list[OmniDiffusionRequest]) -> list[int]:
@@ -858,11 +907,42 @@ class DiffusionWorker:
 
     def shutdown(self) -> None:
         """Shutdown the worker and cleanup distributed environment."""
+        first_error: BaseException | None = None
+
+        def record_error(exc: BaseException) -> None:
+            nonlocal first_error
+            if first_error is None:
+                first_error = exc
+            else:
+                try:
+                    note = f"additional shutdown failure: {type(exc).__name__}: {exc}"
+                except BaseException:
+                    note = "additional shutdown failure"
+                try:
+                    first_error.add_note(note)
+                except BaseException:
+                    # Error aggregation must not abort the remaining shutdown.
+                    pass
+
         if self.model_runner is not None:
             mgr = getattr(self.model_runner, "kv_transfer_manager", None)
             if mgr is not None:
-                mgr.shutdown_prefetch()
-        destroy_distributed_env()
+                try:
+                    mgr.shutdown_prefetch()
+                except BaseException as exc:
+                    record_error(exc)
+            shutdown_runner = getattr(self.model_runner, "shutdown", None)
+            if callable(shutdown_runner):
+                try:
+                    shutdown_runner()
+                except BaseException as exc:
+                    record_error(exc)
+        try:
+            destroy_distributed_env()
+        except BaseException as exc:
+            record_error(exc)
+        if first_error is not None:
+            raise first_error
 
 
 class CustomPipelineWorkerExtension:
