@@ -1095,6 +1095,7 @@ def test_transfer_config_media_helpers_and_preprocess_budget(monkeypatch: pytest
     )
     additional = preprocess(request).prompt["additional_information"]
     assert (request.sampling_params.height, request.sampling_params.width) == (192, 320)
+    assert request.sampling_params.extra_args["_cosmos3_transfer_requested_size"] == {"width": 32, "height": 16}
     assert tuple(additional["preprocessed_transfer_video"].shape) == (1, 3, 4, 192, 320)
     assert additional["transfer_input_fps"] == 12.5
     assert "preprocessed_video" not in additional
@@ -1517,6 +1518,140 @@ def test_format_and_tokenize_prompts_rewrites_json_object_metadata(make_cosmos3_
     assert "The video is 2.0 seconds long" not in calls[0]["text"]
     assert calls[1]["text"] == (
         "bad. The video is not 2.0 seconds long and is not of 24 FPS. This video is not of 720x1280 resolution."
+    )
+
+
+def test_format_and_tokenize_prompts_transfer_aspect_ratio_override(make_cosmos3_pipeline) -> None:
+    import json
+
+    pipeline = make_cosmos3_pipeline()
+    calls = _capture_tokenize_calls(pipeline)
+
+    pipeline._format_and_tokenize_prompts(
+        '{"caption": "A robot", "aspect_ratio": "4,3"}',
+        "",
+        num_frames=48,
+        frame_rate=24,
+        height=480,
+        width=832,
+        max_sequence_length=32,
+        sp=SimpleNamespace(extra_args={"aspect_ratio": "4:3"}),
+        is_t2i=False,
+        aspect_ratio_override="16,9",
+    )
+
+    assert json.loads(calls[0]["text"])["aspect_ratio"] == "16,9"
+
+
+@pytest.mark.parametrize("rank_zero", [True, False])
+def test_format_and_tokenize_prompts_corrects_conflicting_aspect_ratio_metadata_on_every_rank(
+    make_cosmos3_pipeline,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker,
+    rank_zero: bool,
+) -> None:
+    import json
+
+    from vllm_omni.diffusion.models.cosmos3 import pipeline_cosmos3
+
+    pipeline = make_cosmos3_pipeline()
+    calls = _capture_tokenize_calls(pipeline)
+    monkeypatch.setattr(pipeline_cosmos3, "_is_rank_zero", lambda: rank_zero)
+    warning = mocker.patch.object(pipeline_cosmos3.logger, "warning")
+
+    pipeline._format_and_tokenize_prompts(
+        '{"caption": "A robot", "aspect_ratio": "4,3"}',
+        "",
+        num_frames=48,
+        frame_rate=24,
+        height=720,
+        width=1280,
+        max_sequence_length=32,
+        sp=SimpleNamespace(extra_args={}),
+        is_t2i=False,
+    )
+
+    assert json.loads(calls[0]["text"])["aspect_ratio"] == "16,9"
+    if rank_zero:
+        rendered_warning = warning.call_args.args[0] % warning.call_args.args[1:]
+        assert "JSON prompt aspect_ratio='4,3' conflicts with the generated 1280x720 canvas" in rendered_warning
+    else:
+        warning.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "aspect_ratio"),
+    [
+        (1104, 816, "4,3"),
+        (832, 468, "16,9"),
+    ],
+)
+def test_format_and_tokenize_prompts_keeps_nearest_canonical_aspect_ratio(
+    make_cosmos3_pipeline,
+    mocker,
+    width: int,
+    height: int,
+    aspect_ratio: str,
+) -> None:
+    import json
+
+    from vllm_omni.diffusion.models.cosmos3 import pipeline_cosmos3
+
+    pipeline = make_cosmos3_pipeline()
+    calls = _capture_tokenize_calls(pipeline)
+    warning = mocker.patch.object(pipeline_cosmos3.logger, "warning")
+
+    pipeline._format_and_tokenize_prompts(
+        json.dumps({"caption": "A robot", "aspect_ratio": aspect_ratio}),
+        "",
+        num_frames=48,
+        frame_rate=24,
+        height=height,
+        width=width,
+        max_sequence_length=32,
+        sp=SimpleNamespace(extra_args={}),
+        is_t2i=False,
+    )
+
+    assert json.loads(calls[0]["text"])["aspect_ratio"] == aspect_ratio
+    warning.assert_not_called()
+
+
+def test_transfer_bucket_selection_warns_on_size_and_aspect_ratio_conflicts(
+    make_cosmos3_pipeline,
+    mocker,
+) -> None:
+    from vllm_omni.diffusion.models.cosmos3 import pipeline_cosmos3
+
+    pipeline = make_cosmos3_pipeline()
+    warning = mocker.patch.object(pipeline_cosmos3.logger, "warning")
+    sp = make_sampling_params(
+        width=832,
+        height=480,
+        extra_args={
+            "resolution": "480",
+            "aspect_ratio": "4:3",
+            "_cosmos3_transfer_requested_size": {"width": 1280, "height": 720},
+        },
+    )
+
+    height, width, aspect_ratio = pipeline._transfer_bucket_size(sp, (480, 832))
+    assert (height, width, aspect_ratio) == (480, 832, "16,9")
+
+    pipeline._warn_transfer_bucket_conflicts(
+        sp,
+        "A transfer prompt",
+        source_hw=(480, 832),
+        height=height,
+        width=width,
+        aspect_ratio=aspect_ratio,
+    )
+
+    rendered_warnings = [call.args[0] % call.args[1:] for call in warning.call_args_list]
+    assert any("ignores requested size=1280x720 (WxH)" in message for message in rendered_warnings)
+    assert any(
+        "requested aspect_ratio='4:3' conflicts with the control-selected 16,9 bucket" in message
+        for message in rendered_warnings
     )
 
 
@@ -1989,6 +2124,7 @@ def test_forward_transfer_uses_transfer_prompt_contract_and_source_fps_except_ws
         captured["negative_prompt"] = negative_prompt
         captured["format_frame_rate"] = frame_rate
         captured["format_kwargs"] = kwargs
+        captured["format_aspect_ratio"] = kwargs["aspect_ratio_override"]
         return _ids(2), _mask(), _ids(1), _mask()
 
     def fake_encode(video: torch.Tensor) -> torch.Tensor:
@@ -2011,7 +2147,7 @@ def test_forward_transfer_uses_transfer_prompt_contract_and_source_fps_except_ws
         captured["shared_kwargs"] = kwargs["shared_kwargs"]
         return kwargs["latents"]
 
-    pipeline._transfer_bucket_size = lambda sp, source_hw: (16, 16)
+    pipeline._transfer_bucket_size = lambda sp, source_hw: (16, 16, "1,1")
     pipeline._format_and_tokenize_prompts = fake_format
     pipeline._encode_video_tensor = fake_encode
     pipeline._prepare_transfer_latents = fake_prepare
@@ -2056,6 +2192,7 @@ def test_forward_transfer_uses_transfer_prompt_contract_and_source_fps_except_ws
     output = pipeline.forward(request)
 
     assert captured["format_frame_rate"] == expected_fps
+    assert captured["format_aspect_ratio"] == "1,1"
     expected_negative_prompt = "" if negative_prompt is None else negative_prompt
     assert captured["negative_prompt"] == expected_negative_prompt
     assert captured["format_kwargs"]["use_system_prompt"] is True
@@ -2082,7 +2219,7 @@ def test_forward_transfer_runs_multichunk_overlap_path(
     pipeline = make_cosmos3_pipeline()
     captured: dict[str, Any] = {"targets": [], "conditional_frames": []}
 
-    pipeline._transfer_bucket_size = lambda sp, source_hw: (16, 16)
+    pipeline._transfer_bucket_size = lambda sp, source_hw: (16, 16, "1,1")
     pipeline._format_and_tokenize_prompts = lambda *args, **kwargs: (_ids(2), _mask(), _ids(1), _mask())
     pipeline._set_flow_shift = lambda target, **_kwargs: captured.setdefault("flow_shifts", []).append(target)
 

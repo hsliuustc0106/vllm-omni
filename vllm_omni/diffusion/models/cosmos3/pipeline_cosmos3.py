@@ -126,6 +126,7 @@ from .utils import (
     ROBOLAB_DEFAULT_RAW_ACTION_DIM,
     ROBOLAB_DEFAULT_RESOLUTION,
     ROBOLAB_MIDTRAIN_RAW_ACTION_DIM,
+    VIDEO_RES_SIZE_INFO,
     RoboLabActionPostprocessInputs,
     RoboLabPolicyInputs,
     build_abs_pose_from_components,
@@ -199,6 +200,7 @@ COSMOS3_DISTILLED_CHECKPOINT_SCHEDULER_CLASS = "FlowMatchEulerDiscreteScheduler"
 # are tokenized to their natural length (no padding); this only bounds the
 # UND pathway / GEN cross-attention cost for pathologically long prompts.
 COSMOS3_DEFAULT_MAX_SEQUENCE_LENGTH = 4096
+COSMOS3_TRANSFER_REQUESTED_SIZE_KEY = "_cosmos3_transfer_requested_size"
 
 
 def _ceil_video_num_frames(num_frames: int, temporal_compression_factor: int) -> int:
@@ -241,6 +243,50 @@ def _format_json_object_prompt(
 
     prompt_obj.update(metadata)
     return json.dumps(prompt_obj)
+
+
+def _json_object_aspect_ratio(prompt: str) -> Any | None:
+    """Return an aspect-ratio field from a JSON-object prompt, if present."""
+    try:
+        prompt_obj = json.loads(prompt)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(prompt_obj, dict):
+        return None
+    return prompt_obj.get("aspect_ratio")
+
+
+def _normalize_aspect_ratio(value: Any) -> str | None:
+    """Normalize supported ratio spellings for comparison and prompt metadata."""
+    if value is None:
+        return None
+    parts = str(value).strip().replace(":", ",").split(",")
+    if len(parts) != 2:
+        return None
+    try:
+        width, height = (int(part.strip()) for part in parts)
+    except ValueError:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    divisor = math.gcd(width, height)
+    return f"{width // divisor},{height // divisor}"
+
+
+def _aspect_ratio_for_dimensions(width: int, height: int) -> str:
+    """Return the nearest supported Cosmos aspect-ratio label."""
+    if width <= 0 or height <= 0:
+        raise ValueError(f"Cosmos3 canvas dimensions must be positive, got {width}x{height}.")
+    canvas_ratio = width / height
+
+    def ratio_value(label: str) -> float:
+        ratio_width, ratio_height = (int(part) for part in label.split(","))
+        return ratio_width / ratio_height
+
+    return min(
+        (label for sizes in VIDEO_RES_SIZE_INFO.values() for label in sizes),
+        key=lambda label: abs(canvas_ratio - ratio_value(label)),
+    )
 
 
 def resolve_cosmos3_transformer_cls(model_config: Any) -> type[Cosmos3VFMTransformer]:
@@ -500,6 +546,17 @@ def get_cosmos3_pre_process_func(od_config: OmniDiffusionConfig):
 
         # Resolve missing H/W.
         if transfer_requested:
+            requested_width = request.sampling_params.width
+            requested_height = request.sampling_params.height
+            if (
+                requested_width is not None
+                and requested_height is not None
+                and COSMOS3_TRANSFER_REQUESTED_SIZE_KEY not in extra
+            ):
+                extra[COSMOS3_TRANSFER_REQUESTED_SIZE_KEY] = {
+                    "width": int(requested_width),
+                    "height": int(requested_height),
+                }
             _set_transfer_size_from_image(request, image)
         elif request.sampling_params.height is None or request.sampling_params.width is None:
             if action_mode is not None:
@@ -2081,6 +2138,7 @@ class Cosmos3OmniDiffusersPipeline(
         use_duration_template: bool | None = None,
         use_resolution_template: bool | None = None,
         negative_metadata_mode: str | None = None,
+        aspect_ratio_override: str | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Format prompts with metadata templates and tokenize.
 
@@ -2115,13 +2173,40 @@ class Cosmos3OmniDiffusersPipeline(
             res_tmpl = COSMOS3_IMAGE_RESOLUTION_TEMPLATE if is_t2i else COSMOS3_RESOLUTION_TEMPLATE
         else:
             res_tmpl = None
+        requested_aspect_ratio = self._get_sp_param(sp, "aspect_ratio", None)
+        prompt_aspect_ratio = _json_object_aspect_ratio(prompt)
+        metadata_aspect_ratio = requested_aspect_ratio if requested_aspect_ratio is not None else prompt_aspect_ratio
+        canvas_aspect_ratio = aspect_ratio_override or _aspect_ratio_for_dimensions(width, height)
+        normalized_metadata_ratio = _normalize_aspect_ratio(metadata_aspect_ratio)
+        has_aspect_ratio_conflict = (
+            aspect_ratio_override is None
+            and metadata_aspect_ratio is not None
+            and normalized_metadata_ratio != canvas_aspect_ratio
+        )
+        if has_aspect_ratio_conflict:
+            aspect_ratio_source = (
+                "requested aspect_ratio" if requested_aspect_ratio is not None else "JSON prompt aspect_ratio"
+            )
+            if _is_rank_zero():
+                logger.warning(
+                    "Cosmos3 %s=%r conflicts with the generated %dx%d canvas (WxH); using %s for prompt metadata.",
+                    aspect_ratio_source,
+                    metadata_aspect_ratio,
+                    width,
+                    height,
+                    canvas_aspect_ratio,
+                )
+            metadata_aspect_ratio = canvas_aspect_ratio
+        elif aspect_ratio_override is not None:
+            metadata_aspect_ratio = aspect_ratio_override
+
         json_prompt = _format_json_object_prompt(
             prompt,
             num_frames=num_frames,
             frame_rate=frame_rate,
             height=height,
             width=width,
-            aspect_ratio=self._get_sp_param(sp, "aspect_ratio", None),
+            aspect_ratio=metadata_aspect_ratio,
         )
         if json_prompt is not None:
             prompt = json_prompt
@@ -2893,11 +2978,76 @@ class Cosmos3OmniDiffusersPipeline(
         self,
         sp: OmniDiffusionSamplingParams,
         source_hw: tuple[int, int] | None,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, str]:
         resolution = self._get_sp_param(sp, "resolution", self._get_sp_param(sp, "image_size", 720))
         source_h, source_w = source_hw or (COSMOS3_T2V_DEFAULT_HEIGHT, COSMOS3_T2V_DEFAULT_WIDTH)
         target_w, target_h = find_closest_target_size(int(source_h), int(source_w), resolution)
-        return int(target_h), int(target_w)
+        aspect_ratio = next(
+            ratio for ratio, size in VIDEO_RES_SIZE_INFO[str(resolution)].items() if size == (target_w, target_h)
+        )
+        return int(target_h), int(target_w), aspect_ratio
+
+    def _warn_transfer_bucket_conflicts(
+        self,
+        sp: OmniDiffusionSamplingParams,
+        prompt: str,
+        *,
+        source_hw: tuple[int, int] | None,
+        height: int,
+        width: int,
+        aspect_ratio: str,
+    ) -> None:
+        """Explain transfer's bucket selection when it overrides request metadata."""
+        if not _is_rank_zero():
+            return
+
+        requested_size_data = self._get_sp_param(sp, COSMOS3_TRANSFER_REQUESTED_SIZE_KEY, None)
+        if isinstance(requested_size_data, Mapping):
+            requested_width = requested_size_data.get("width")
+            requested_height = requested_size_data.get("height")
+        else:
+            requested_width = getattr(sp, "width", None)
+            requested_height = getattr(sp, "height", None)
+        if requested_width is not None and requested_height is not None:
+            try:
+                requested_size = (int(requested_width), int(requested_height))
+            except (TypeError, ValueError):
+                requested_size = None
+            if requested_size is not None and requested_size != (width, height):
+                source_description = (
+                    f"control input {source_hw[1]}x{source_hw[0]} (WxH)"
+                    if source_hw is not None
+                    else "the default transfer geometry"
+                )
+                resolution = self._get_sp_param(sp, "resolution", self._get_sp_param(sp, "image_size", 720))
+                logger.warning(
+                    "Cosmos3 transfer ignores requested size=%dx%d (WxH); %s selected the %s resolution=%s "
+                    "bucket, %dx%d (WxH). Transfer supports canonical Cosmos buckets, not arbitrary output sizes.",
+                    *requested_size,
+                    source_description,
+                    aspect_ratio,
+                    resolution,
+                    width,
+                    height,
+                )
+
+        request_aspect_ratio = self._get_sp_param(sp, "aspect_ratio", None)
+        aspect_ratio_source = "requested aspect_ratio"
+        if request_aspect_ratio is None:
+            request_aspect_ratio = _json_object_aspect_ratio(prompt)
+            aspect_ratio_source = "JSON prompt aspect_ratio"
+        normalized_requested_ratio = _normalize_aspect_ratio(request_aspect_ratio)
+        if normalized_requested_ratio is not None and normalized_requested_ratio != aspect_ratio:
+            logger.warning(
+                "Cosmos3 transfer %s=%r conflicts with the control-selected %s bucket, %dx%d (WxH); "
+                "using %s for prompt metadata.",
+                aspect_ratio_source,
+                request_aspect_ratio,
+                aspect_ratio,
+                width,
+                height,
+                aspect_ratio,
+            )
 
     @staticmethod
     def _first_transfer_control_hw(transfer_config: Cosmos3TransferConfig) -> tuple[int, int] | None:
@@ -3083,7 +3233,15 @@ class Cosmos3OmniDiffusersPipeline(
             source_hw = (int(input_frames.shape[-2]), int(input_frames.shape[-1]))
         else:
             source_hw = self._first_transfer_control_hw(transfer_config)
-        height, width = self._transfer_bucket_size(sp, source_hw)
+        height, width, transfer_aspect_ratio = self._transfer_bucket_size(sp, source_hw)
+        self._warn_transfer_bucket_conflicts(
+            sp,
+            prompt,
+            source_hw=source_hw,
+            height=height,
+            width=width,
+            aspect_ratio=transfer_aspect_ratio,
+        )
 
         if input_frames is not None:
             if tuple(input_frames.shape[-2:]) != (height, width):
@@ -3190,6 +3348,7 @@ class Cosmos3OmniDiffusersPipeline(
             use_duration_template=bool(self._get_sp_param(sp, "use_duration_template", True)),
             use_resolution_template=bool(self._get_sp_param(sp, "use_resolution_template", True)),
             negative_metadata_mode=str(self._get_sp_param(sp, "negative_metadata_mode", "same")),
+            aspect_ratio_override=transfer_aspect_ratio,
         )
 
         output_chunks: list[torch.Tensor] = []
