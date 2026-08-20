@@ -35,6 +35,7 @@ from .weight_consumer import (
     BuiltinOffloadWeightConsumer,
     BuiltinOffloadWeightConsumerFactory,
     ConsumerLifecyclePhase,
+    HostWeightOffloadBackend,
 )
 
 logger = init_logger(__name__)
@@ -47,6 +48,7 @@ __all__ = [
     "BuiltinOffloadWeightConsumer",
     "BuiltinOffloadWeightConsumerFactory",
     "ConsumerLifecyclePhase",
+    "HostWeightOffloadBackend",
     "LayerWiseOffloadBackend",
     "DistributedLayerwiseOffloadBackend",
     "DistributedLayerwiseOffloadHook",

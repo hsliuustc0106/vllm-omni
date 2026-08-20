@@ -7,13 +7,17 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm_omni.diffusion.host_weight.session import HostCopyMode
+from vllm_omni.diffusion.host_weight.session import (
+    HostCopyMode,
+    PreparedWeightAccessSession,
+)
 from vllm_omni.diffusion.host_weight.transfer import TransferPlanKind
 from vllm_omni.diffusion.offloader.base import OffloadConfig, OffloadStrategy
 from vllm_omni.diffusion.offloader.weight_consumer import (
     BuiltinOffloadWeightConsumer,
     BuiltinOffloadWeightConsumerFactory,
     ConsumerLifecyclePhase,
+    HostWeightOffloadBackend,
 )
 from vllm_omni.host_weight_runtime import AccessFeature, BackingKind
 
@@ -128,24 +132,40 @@ def test_factory_rejects_a_different_pipeline_identity() -> None:
 
 
 class _Prepared:
-    def __init__(self) -> None:
+    def __init__(self, *, rollback_errors: list[BaseException] | None = None) -> None:
+        self.rollback_errors = list(rollback_errors or ())
         self.rollback_calls = 0
 
     def rollback(self) -> None:
         self.rollback_calls += 1
+        if self.rollback_errors:
+            raise self.rollback_errors.pop(0)
 
 
 class _Backend:
     def __init__(
         self,
         *,
+        adopt_error: BaseException | None = None,
         enable_error: BaseException | None = None,
-        session: object | None = None,
+        session_state: dict[str, object] | None = None,
     ) -> None:
+        self.adopt_error = adopt_error
         self.enable_error = enable_error
+        self.adopt_attempts: list[PreparedWeightAccessSession] = []
+        self.prepared: PreparedWeightAccessSession | None = None
         self.enable_calls: list[object] = []
         self.disable_calls = 0
-        self._weight_session = session
+        self.rollback_sessions: list[PreparedWeightAccessSession] = []
+        self.session_state = session_state
+
+    def adopt_prepared_session(self, prepared: PreparedWeightAccessSession) -> None:
+        self.adopt_attempts.append(prepared)
+        if self.adopt_error is not None:
+            raise self.adopt_error
+        if self.prepared is not None:
+            raise RuntimeError("fake backend already owns a prepared session")
+        self.prepared = prepared
 
     def enable(self, pipeline: object) -> None:
         self.enable_calls.append(pipeline)
@@ -154,12 +174,31 @@ class _Backend:
 
     def disable(self) -> None:
         self.disable_calls += 1
+        prepared = self.prepared
+        if prepared is not None:
+            prepared.rollback()
+            self.rollback_sessions.append(prepared)
+            if self.prepared is prepared:
+                self.prepared = None
+
+    def is_enabled(self) -> bool:
+        return bool(self.enable_calls) and self.prepared is not None
 
     def host_weight_diagnostics(self) -> dict[str, int]:
         return {
             "pinned_slot_budget_bytes": 4096,
             "events": 2,
         }
+
+    def host_weight_session_idle_state(self) -> dict[str, object]:
+        if self.session_state is None:
+            return {
+                "outstanding_units": 0,
+                "bindings": 0,
+                "resident_bindings": 0,
+                "total_bindings": 0,
+            }
+        return dict(self.session_state)
 
 
 class _InjectedConsumer(BuiltinOffloadWeightConsumer):
@@ -171,7 +210,7 @@ class _InjectedConsumer(BuiltinOffloadWeightConsumer):
         )
         self.injected_backend = backend
 
-    def _build_backend(self, _prepared: object) -> object:
+    def _build_backend(self) -> HostWeightOffloadBackend:
         return self.injected_backend
 
 
@@ -186,6 +225,9 @@ def test_consumer_enable_and_disable_are_transactional() -> None:
 
     assert consumer.phase is ConsumerLifecyclePhase.ACTIVE
     assert consumer.backend is backend
+    assert consumer.backend.is_enabled()
+    assert backend.adopt_attempts == [prepared]
+    assert backend.prepared is prepared
     assert backend.enable_calls == [pipeline]
     assert prepared.rollback_calls == 0
 
@@ -194,20 +236,75 @@ def test_consumer_enable_and_disable_are_transactional() -> None:
 
     assert consumer.phase is ConsumerLifecyclePhase.CLOSED
     assert backend.disable_calls == 1
+    assert backend.rollback_sessions == [prepared]
+    assert prepared.rollback_calls == 1
 
 
-def test_consumer_enable_failure_disables_the_published_backend() -> None:
+def test_consumer_adoption_failure_rolls_back_the_caller_owned_session() -> None:
+    failure = RuntimeError("injected adoption failure")
+    backend = _Backend(adopt_error=failure)
+    prepared = _Prepared()
+    consumer = _InjectedConsumer(backend, object())
+    consumer.adopt_prepared_session(prepared)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="injected adoption failure") as raised:
+        consumer.enable_transactionally()
+
+    assert raised.value is failure
+    assert consumer.phase is ConsumerLifecyclePhase.CLOSED
+    assert backend.adopt_attempts == [prepared]
+    assert backend.prepared is None
+    assert backend.enable_calls == []
+    assert backend.disable_calls == 0
+    assert prepared.rollback_calls == 1
+
+
+def test_consumer_enable_failure_rolls_back_the_backend_owned_session() -> None:
     failure = RuntimeError("injected enable failure")
     backend = _Backend(enable_error=failure)
+    prepared = _Prepared()
     consumer = _InjectedConsumer(backend, object())
-    consumer.adopt_prepared_session(_Prepared())  # type: ignore[arg-type]
+    consumer.adopt_prepared_session(prepared)  # type: ignore[arg-type]
 
     with pytest.raises(RuntimeError, match="injected enable failure") as raised:
         consumer.enable_transactionally()
 
     assert raised.value is failure
     assert consumer.phase is ConsumerLifecyclePhase.CLOSED
+    assert backend.adopt_attempts == [prepared]
     assert backend.disable_calls == 1
+    assert backend.rollback_sessions == [prepared]
+    assert prepared.rollback_calls == 1
+
+
+def test_consumer_enable_cleanup_failure_retains_backend_for_retry() -> None:
+    failure = RuntimeError("injected enable failure")
+    cleanup_failure = RuntimeError("injected cleanup failure")
+    backend = _Backend(enable_error=failure)
+    prepared = _Prepared(
+        rollback_errors=[cleanup_failure],
+    )
+    consumer = _InjectedConsumer(backend, object())
+    consumer.adopt_prepared_session(prepared)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="injected enable failure") as raised:
+        consumer.enable_transactionally()
+
+    assert raised.value is failure
+    assert any("injected cleanup failure" in note for note in raised.value.__notes__)
+    assert consumer.phase is ConsumerLifecyclePhase.QUIESCING
+    assert consumer.backend is backend
+    assert backend.prepared is prepared
+    assert prepared.rollback_calls == 1
+
+    consumer.disable()
+
+    assert consumer.phase is ConsumerLifecyclePhase.CLOSED
+    assert backend.disable_calls == 2
+    assert backend.rollback_sessions == [prepared]
+    assert prepared.rollback_calls == 2
+    with pytest.raises(RuntimeError, match="has not been constructed"):
+        _ = consumer.backend
 
 
 def test_consumer_rolls_back_an_unpublished_prepared_session() -> None:
@@ -226,14 +323,13 @@ def test_consumer_rolls_back_an_unpublished_prepared_session() -> None:
 
 
 def test_consumer_composes_backend_and_session_diagnostics() -> None:
-    session = SimpleNamespace(
-        idle_state=lambda: {
+    backend = _Backend(
+        session_state={
             "state": "active",
             "outstanding_units": 0,
             "bindings": 0,
         }
     )
-    backend = _Backend(session=session)
     consumer = _InjectedConsumer(backend, object())
     consumer.adopt_prepared_session(_Prepared())  # type: ignore[arg-type]
     consumer.enable_transactionally()

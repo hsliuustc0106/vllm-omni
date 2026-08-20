@@ -758,9 +758,19 @@ class _DiffusionConfigProjection:
             TransformerConfig,
             build_attention_config,
             parse_kv_cache_skip_selector,
+            validate_host_weight_offload_configuration,
         )
         from vllm_omni.diffusion.diffusion_kv.config import parse_diffusion_kv_cache_mode
         from vllm_omni.quantization import build_quant_config
+
+        validate_host_weight_offload_configuration(
+            enable_cpu_offload=self.enable_cpu_offload,
+            enable_layerwise_offload=self.enable_layerwise_offload,
+            enable_distributed_layerwise_offload=self.enable_distributed_layerwise_offload,
+            dlo_use_allgather=self.dlo_use_allgather,
+            host_weight_runtime_mode=self.host_weight_runtime_mode,
+            host_weight_runtime_required=self.host_weight_runtime_required,
+        )
 
         if self.tf_model_config is None:
             self.tf_model_config = TransformerConfig()

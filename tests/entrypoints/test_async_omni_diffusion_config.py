@@ -376,6 +376,7 @@ def test_serve_cli_forwards_host_weight_runtime():
             "read_write",
             "--host-weight-runtime-root",
             "/var/tmp/vllm-omni-host-weights",
+            "--enable-cpu-offload",
             "--host-weight-runtime-required",
             "--host-weight-runtime-wait-timeout-s",
             "17.5",
@@ -388,6 +389,7 @@ def test_serve_cli_forwards_host_weight_runtime():
 
     assert engine_args["host_weight_runtime_mode"] == "read_write"
     assert engine_args["host_weight_runtime_root"] == "/var/tmp/vllm-omni-host-weights"
+    assert engine_args["enable_cpu_offload"] is True
     assert engine_args["host_weight_runtime_required"] is True
     assert engine_args["host_weight_runtime_wait_timeout_s"] == 17.5
 

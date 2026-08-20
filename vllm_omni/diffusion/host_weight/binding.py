@@ -20,7 +20,6 @@ from .formats.base import (
     ModuleStateKind,
     TargetModulePath,
 )
-from .formats.fp8_per_tensor import TARGET_MODULE_TYPE_ID
 from .skeleton import PipelineSkeleton
 
 
@@ -893,9 +892,16 @@ class DiffusionConsumerBinder:
         format_adapter: ConsumerFormatAdapter,
         cleanup: object | None = None,
     ) -> PreparedModuleBinding:
-        if skeleton.target_module_type_id != TARGET_MODULE_TYPE_ID:
+        descriptor = getattr(format_adapter, "descriptor", None)
+        if isinstance(descriptor, Mapping):
+            adapter_target_type_id = descriptor.get("target_module_type_id")
+        else:
+            adapter_target_type_id = getattr(descriptor, "target_module_type_id", None)
+        if not isinstance(adapter_target_type_id, str) or not adapter_target_type_id:
+            raise BindingValidationError("format adapter descriptor has no target module type ID")
+        if skeleton.target_module_type_id != adapter_target_type_id:
             raise BindingValidationError(
-                f"skeleton target type ID {skeleton.target_module_type_id!r} is not allowlisted"
+                f"skeleton target type ID {skeleton.target_module_type_id!r} differs from the selected format adapter"
             )
         resolved_target = _resolve_pipeline_target(
             skeleton.pipeline,

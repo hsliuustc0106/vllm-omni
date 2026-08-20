@@ -932,10 +932,10 @@ class LayerWiseOffloadBackend(OffloadBackend):
 
         self.copy_stream = current_omni_platform.Stream()
         self._blocks: list[list[nn.Module]] = []
-        self._prepared_weight_session = prepared_weight_session
+        self._prepared_weight_session: PreparedWeightAccessSession | None = None
         self._weight_session: WeightAccessSession | None = None
         self._weight_session_handle = _WeightSessionHandle(fail_closed_callback=self._terminate_host_weight_session)
-        self._uses_weight_session = prepared_weight_session is not None
+        self._uses_weight_session = False
         self._host_weight_terminal = False
         self._host_weight_teardown_phase = _SessionTeardownPhase.ACTIVE
         self._host_weight_bindings: dict[int, _HostWeightBlockBinding] = {}
@@ -943,6 +943,16 @@ class LayerWiseOffloadBackend(OffloadBackend):
         self._source_hooked_blocks: list[nn.Module] = []
         self._session_initial_hooks: list[LayerwiseOffloadHook] = []
         self._resident_weight_controller: _ResidentWeightController | None = None
+        if prepared_weight_session is not None:
+            self.adopt_prepared_session(prepared_weight_session)
+
+    def adopt_prepared_session(self, prepared: PreparedWeightAccessSession) -> None:
+        """Atomically take cleanup authority for one prepared HWR session."""
+
+        if self.enabled or self._uses_weight_session or self._host_weight_terminal:
+            raise RuntimeError("layer-wise offloader already owns host-weight session state")
+        self._prepared_weight_session = prepared
+        self._uses_weight_session = True
 
     def enable(self, pipeline: nn.Module) -> None:
         if self.enabled:
@@ -1252,6 +1262,19 @@ class LayerWiseOffloadBackend(OffloadBackend):
             "pinned_slot_budget_bytes": _pinned_cpu_storage_bytes(tensors),
             "events": _incomplete_event_count(events),
         }
+
+    def host_weight_session_idle_state(self) -> dict[str, object]:
+        """Return session state without exposing the ownership-bearing handle."""
+
+        session = self._weight_session
+        if session is None:
+            return {
+                "outstanding_units": 0,
+                "bindings": 0,
+                "resident_bindings": 0,
+                "total_bindings": 0,
+            }
+        return dict(session.idle_state())
 
     @classmethod
     def _prepare_host_weight_bindings(

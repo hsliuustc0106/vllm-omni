@@ -3,7 +3,12 @@
 
 import pytest
 
-from vllm_omni.diffusion.data import OmniDiffusionConfig
+from vllm_omni.diffusion.data import (
+    HostWeightOffloadConfigurationError,
+    HostWeightOffloadValidationCode,
+    OmniDiffusionConfig,
+)
+from vllm_omni.diffusion.offloader.base import OffloadConfig, OffloadStrategy
 from vllm_omni.diffusion.worker.diffusion_model_runner import DiffusionModelRunner
 from vllm_omni.diffusion.worker.diffusion_worker import DiffusionWorker
 
@@ -47,6 +52,123 @@ def test_host_weight_runtime_rejects_non_positive_or_non_finite_wait_timeout(
             model="test",
             host_weight_runtime_wait_timeout_s=timeout,
         )
+
+
+@pytest.mark.parametrize(
+    "offload_flags",
+    [
+        {"enable_cpu_offload": True, "enable_layerwise_offload": True},
+        {
+            "enable_cpu_offload": True,
+            "enable_distributed_layerwise_offload": True,
+            "dlo_use_allgather": False,
+        },
+        {
+            "enable_layerwise_offload": True,
+            "enable_distributed_layerwise_offload": True,
+            "dlo_use_allgather": False,
+        },
+    ],
+)
+def test_hwr_rejects_conflicting_offload_modes(tmp_path, offload_flags):
+    with pytest.raises(HostWeightOffloadConfigurationError) as exc_info:
+        OmniDiffusionConfig(
+            model="test",
+            host_weight_runtime_mode="read_write",
+            host_weight_runtime_root=str(tmp_path),
+            **offload_flags,
+        )
+
+    assert exc_info.value.code is HostWeightOffloadValidationCode.CONFLICTING_OFFLOAD_MODES
+
+
+def test_hwr_requires_one_offloader(tmp_path):
+    with pytest.raises(HostWeightOffloadConfigurationError) as exc_info:
+        OmniDiffusionConfig(
+            model="test",
+            host_weight_runtime_mode="read_write",
+            host_weight_runtime_root=str(tmp_path),
+        )
+
+    assert exc_info.value.code is HostWeightOffloadValidationCode.HWR_REQUIRES_OFFLOADER
+
+
+def test_hwr_rejects_dlo_allgather(tmp_path):
+    with pytest.raises(HostWeightOffloadConfigurationError) as exc_info:
+        OmniDiffusionConfig(
+            model="test",
+            enable_distributed_layerwise_offload=True,
+            dlo_use_allgather=True,
+            host_weight_runtime_mode="read_write",
+            host_weight_runtime_root=str(tmp_path),
+        )
+
+    assert exc_info.value.code is HostWeightOffloadValidationCode.HWR_DLO_ALLGATHER_UNSUPPORTED
+
+
+def test_required_hwr_cannot_be_disabled():
+    with pytest.raises(HostWeightOffloadConfigurationError) as exc_info:
+        OmniDiffusionConfig(
+            model="test",
+            host_weight_runtime_required=True,
+        )
+
+    assert exc_info.value.code is HostWeightOffloadValidationCode.HWR_REQUIRED_WHILE_DISABLED
+
+
+@pytest.mark.parametrize(
+    ("offload_flags", "expected_strategy"),
+    [
+        ({"enable_cpu_offload": True}, OffloadStrategy.MODEL_LEVEL),
+        ({"enable_layerwise_offload": True}, OffloadStrategy.LAYER_WISE),
+        (
+            {
+                "enable_distributed_layerwise_offload": True,
+                "dlo_use_allgather": False,
+            },
+            OffloadStrategy.DISTRIBUTED_LAYER_WISE,
+        ),
+    ],
+)
+def test_hwr_accepts_exactly_one_supported_offloader(
+    tmp_path,
+    offload_flags,
+    expected_strategy,
+):
+    config = OmniDiffusionConfig(
+        model="test",
+        host_weight_runtime_mode="read_write",
+        host_weight_runtime_root=str(tmp_path),
+        **offload_flags,
+    )
+
+    assert OffloadConfig.from_od_config(config).strategy is expected_strategy
+
+
+def test_disabled_hwr_preserves_legacy_offloader_priority():
+    config = OmniDiffusionConfig(
+        model="test",
+        enable_cpu_offload=True,
+        enable_layerwise_offload=True,
+        enable_distributed_layerwise_offload=True,
+    )
+
+    assert OffloadConfig.from_od_config(config).strategy is OffloadStrategy.DISTRIBUTED_LAYER_WISE
+
+
+def test_offloader_boundary_revalidates_mutated_hwr_config(tmp_path):
+    config = OmniDiffusionConfig(
+        model="test",
+        enable_cpu_offload=True,
+        host_weight_runtime_mode="read_write",
+        host_weight_runtime_root=str(tmp_path),
+    )
+    config.enable_layerwise_offload = True
+
+    with pytest.raises(HostWeightOffloadConfigurationError) as exc_info:
+        OffloadConfig.from_od_config(config)
+
+    assert exc_info.value.code is HostWeightOffloadValidationCode.CONFLICTING_OFFLOAD_MODES
 
 
 def test_runner_shutdown_delegates_session_teardown_to_offloader():

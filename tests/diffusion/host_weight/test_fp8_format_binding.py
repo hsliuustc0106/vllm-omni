@@ -44,8 +44,10 @@ from vllm_omni.diffusion.host_weight.formats import (
     RequiredLayerTensorBinding,
     canonical_json,
 )
-from vllm_omni.diffusion.host_weight.skeleton import (
+from vllm_omni.diffusion.host_weight.integrations.minimax_h3_fp8 import (
     MiniMaxH3TransformerSkeletonFactory,
+)
+from vllm_omni.diffusion.host_weight.skeleton import (
     PipelineSkeleton,
     SkeletonError,
 )

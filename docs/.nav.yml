@@ -169,6 +169,7 @@ nav:
         - Offloader: design/module/diffusion/offloader.md
       - Execution Platforms: design/module/execution_platforms.md
       - Cache Management: design/module/cache_management.md
+      - Host Weight Runtime: design/module/host_weight_runtime.md
       - Quantization: design/module/quantization.md
       - Observability: design/module/observability.md
       - Profiling: design/module/profiling.md

@@ -1436,7 +1436,7 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         # no-AllGather ranks are independent consumers even when the runtime
         # has DP/SP groups. Never let an injected source enter the collective
         # branch merely because a caller constructed OffloadConfig directly.
-        self.dp_size = 1 if prepared_weight_session is not None else config.dp_size
+        self.dp_size = config.dp_size
         self.rank = 0
         self._blocks: list[list[nn.Module]] = []
         self._all_hook_groups: list[list[DistributedLayerwiseOffloadHook]] = []
@@ -1446,10 +1446,10 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         self._using_rank_local_mmap = False
         self.host_weight_plan = host_weight_plan
         self._mmap_transforms_by_tensor_id: dict[int, Any] = {}
-        self._prepared_weight_session = prepared_weight_session
+        self._prepared_weight_session: PreparedWeightAccessSession | None = None
         self._weight_session: WeightAccessSession | None = None
         self._weight_session_handle = _WeightSessionHandle(fail_closed_callback=self._terminate_weight_session)
-        self._uses_weight_session = prepared_weight_session is not None
+        self._uses_weight_session = False
         self._host_weight_terminal = False
         self._weight_session_teardown_phase = _SessionTeardownPhase.ACTIVE
         self._weight_session_blocks: dict[int, _SessionBlockBinding] = {}
@@ -1457,6 +1457,23 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
         self._session_hooked_blocks: list[nn.Module] = []
         self._resident_weight_controller: _SessionResidentController | None = None
         self._stage_resident_weight_controller: _SessionResidentController | None = None
+        if prepared_weight_session is not None:
+            self.adopt_prepared_session(prepared_weight_session)
+
+    def adopt_prepared_session(self, prepared: PreparedWeightAccessSession) -> None:
+        """Atomically take cleanup authority for one no-AllGather HWR session."""
+
+        if self.config.dlo_use_allgather:
+            raise ValueError("PreparedWeightAccessSession is supported only by DLO no-AllGather mode")
+        if self.host_weight_plan is not None:
+            raise ValueError("DLO accepts either PreparedWeightAccessSession or HostWeightPlan, not both")
+        if self.enabled or self._uses_weight_session or self._host_weight_terminal:
+            raise RuntimeError("distributed layer-wise offloader already owns host-weight session state")
+        # A session-backed no-AllGather backend is a rank-local consumer even
+        # if the surrounding runtime configured a larger data-parallel group.
+        self.dp_size = 1
+        self._prepared_weight_session = prepared
+        self._uses_weight_session = True
 
     def _preflight_weight_session(
         self,
@@ -2726,6 +2743,19 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
             "pinned_slot_budget_bytes": _pinned_cpu_storage_bytes(tensors),
             "events": _incomplete_event_count(events),
         }
+
+    def host_weight_session_idle_state(self) -> dict[str, object]:
+        """Return session state without exposing the ownership-bearing handle."""
+
+        session = self._weight_session
+        if session is None:
+            return {
+                "outstanding_units": 0,
+                "bindings": 0,
+                "resident_bindings": 0,
+                "total_bindings": 0,
+            }
+        return dict(session.idle_state())
 
     @staticmethod
     def _allocate_shared_buffers(

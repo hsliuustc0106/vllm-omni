@@ -682,9 +682,6 @@ class DiffusersPipelineLoader:
             HostWeightResolutionEvidence,
             preparation_failure_evidence,
         )
-        from vllm_omni.diffusion.host_weight.formats.fp8_per_tensor import (
-            FORMAT_ID,
-        )
         from vllm_omni.diffusion.host_weight.ownership import (
             FatalPreparationFailure,
             PreparedSessionReady,
@@ -718,10 +715,9 @@ class DiffusersPipelineLoader:
                 model_init_kwargs={"transformer_override": transformer},
             )
 
-        requirements = consumer_factory.requirements(FORMAT_ID)
         factory.prepare_into(
             owner=owner,
-            consumer_requirements=requirements,
+            consumer_requirements_factory=consumer_factory.requirements,
             pipeline_builder=build_pipeline,
         )
         result = owner.preparation_result
@@ -761,8 +757,17 @@ class DiffusersPipelineLoader:
                     False,
                 )
             )
-            error_type = WeightAccessPreparationError if required else WeightAccessPreparationFallback
-            error = error_type(f"{result.reason.value}: {result.detail}")
+            if required:
+                error = WeightAccessPreparationError(
+                    result.detail,
+                    code=result.reason.value,
+                )
+            else:
+                error = WeightAccessPreparationFallback(
+                    result.detail,
+                    code=result.reason.value,
+                    legacy_reason=result.reason,
+                )
             record_failure_evidence(
                 error,
                 outcome="fatal" if required else "fallback",
@@ -774,7 +779,7 @@ class DiffusersPipelineLoader:
             # Retry is a distinct composition outcome, not permission for one
             # worker to start the ordinary loader.  V1 has no all-rank retry /
             # fallback coordinator at this boundary, so report it fail-closed.
-            error = WeightAccessPreparationError(f"{result.code}: {result.detail}")
+            error = WeightAccessPreparationError(result.detail, code=result.code)
             record_failure_evidence(
                 error,
                 outcome="retryable_failure",
@@ -783,7 +788,7 @@ class DiffusersPipelineLoader:
             )
             raise error
         if isinstance(result, FatalPreparationFailure):
-            error = WeightAccessPreparationError(f"{result.code}: {result.detail}")
+            error = WeightAccessPreparationError(result.detail, code=result.code)
             record_failure_evidence(
                 error,
                 outcome="fatal",

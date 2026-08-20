@@ -9,7 +9,10 @@ import torch
 from torch import nn
 from vllm.logger import init_logger
 
-from vllm_omni.diffusion.data import OmniDiffusionConfig
+from vllm_omni.diffusion.data import (
+    OmniDiffusionConfig,
+    validate_host_weight_offload_configuration,
+)
 
 logger = init_logger(__name__)
 
@@ -36,9 +39,9 @@ class OffloadConfig:
     def from_od_config(cls, od_config: OmniDiffusionConfig) -> "OffloadConfig":
         """Extract and validate offload settings from OmniDiffusionConfig.
 
-        Enforces mutual exclusion among the three offload strategies.
-        Distributed layer-wise takes the highest priority, then layer-wise,
-        then model-level.
+        HWR configurations require exactly one offload strategy. Legacy
+        configurations retain the existing priority order: distributed
+        layer-wise, layer-wise, then model-level.
 
         The ``dp_size`` is automatically derived from ``parallel_config`` —
         it is NOT a user-configurable parameter. The distributed layerwise
@@ -54,6 +57,18 @@ class OffloadConfig:
         enable_layerwise_offload = getattr(od_config, "enable_layerwise_offload", False)
         enable_distributed_layerwise_offload = getattr(od_config, "enable_distributed_layerwise_offload", False)
         pin_cpu_memory = getattr(od_config, "pin_cpu_memory", True)
+        dlo_use_allgather = getattr(od_config, "dlo_use_allgather", True)
+
+        # Revalidate at the consumer boundary as a defense against mutable or
+        # non-dataclass configuration objects bypassing OmniDiffusionConfig.
+        validate_host_weight_offload_configuration(
+            enable_cpu_offload=enable_cpu_offload,
+            enable_layerwise_offload=enable_layerwise_offload,
+            enable_distributed_layerwise_offload=enable_distributed_layerwise_offload,
+            dlo_use_allgather=dlo_use_allgather,
+            host_weight_runtime_mode=getattr(od_config, "host_weight_runtime_mode", "disabled"),
+            host_weight_runtime_required=getattr(od_config, "host_weight_runtime_required", False),
+        )
 
         parallel_config = getattr(od_config, "parallel_config", None)
         use_hsdp = getattr(parallel_config, "use_hsdp", False) if parallel_config else False
@@ -99,7 +114,6 @@ class OffloadConfig:
         # streams the tensors produced by the standard loader, which may
         # already be TP-local shards. This avoids AllGather synchronization
         # requirements (concurrent requests, dummy run skip).
-        dlo_use_allgather = getattr(od_config, "dlo_use_allgather", True)
         dlo_resident_layers = int(getattr(od_config, "dlo_resident_layers", 0))
         if dlo_resident_layers < 0:
             raise ValueError(f"dlo_resident_layers must be >= 0, got {dlo_resident_layers}")

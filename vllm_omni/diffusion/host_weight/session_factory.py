@@ -4,26 +4,16 @@
 
 from __future__ import annotations
 
-import importlib.metadata
 import os
-from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, replace
+from collections.abc import Callable
+from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any
 
 import torch
 from torch import nn
 from vllm.config.load import LoadConfig
-from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    cutlass_fp8_supported,
-)
 
 from vllm_omni.diffusion.data import OmniDiffusionConfig
-from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import (
-    MiniMaxH3Pipeline,
-)
-from vllm_omni.diffusion.registry import _prepare_diffusion_quant_config
 from vllm_omni.host_weight_runtime import (
     ArtifactManifest,
     ArtifactSpec,
@@ -34,17 +24,13 @@ from vllm_omni.host_weight_runtime import (
     FatalFailure,
     HostWeightRuntime,
     LocalArtifactRepository,
-    ProducerDescriptor,
     Ready,
     ResolvedAccess,
     RetryableFailure,
     TopologyCoordinate,
-    WeightFormatDescriptor,
     canonical_digest,
     create_default_host_weight_runtime,
-    derive_weight_format_plan_digest,
 )
-from vllm_omni.quantization import resolve_component_quant_config
 
 from .binding import DiffusionConsumerBinder
 from .build_coordination import (
@@ -59,13 +45,16 @@ from .evidence import (
     HostWeightResolutionEvidence,
     evidence_from_outcome,
 )
-from .formats.fp8_per_tensor import (
-    FORMAT_ADAPTER_ABI,
-    FORMAT_ID,
-    FORMAT_RECIPE_SCHEMA_VERSION,
-    KERNEL_ID,
-    TARGET_MODULE_TYPE_ID,
-    Fp8PerTensorFormatAdapter,
+from .integrations import create_builtin_model_integration_registry
+from .model_integration import (
+    DiffusionPipelineSpec,
+    HostWeightModelIntegrationBundle,
+    ModelIntegrationLegacyClassification,
+    ModelIntegrationRegistry,
+    ModelIntegrationUnavailableError,
+    PreparedModelIntegration,
+    ProducerFactoryContext,
+    SkeletonFactoryContext,
 )
 from .ownership import (
     FatalPreparationFailure,
@@ -77,31 +66,33 @@ from .ownership import (
     WeightConsumerOwner,
 )
 from .pipeline_catalog import compile_pipeline_weight_catalog
-from .producer import (
-    DiffusionArtifactProducer,
-    DiffusionArtifactProducerError,
-    resolve_minimax_h3_transformer_source,
-)
 from .session import (
     HostCopyMode,
     PreparedWeightAccessSession,
     SessionCapabilities,
     SessionRequirements,
 )
-from .skeleton import (
-    MINIMAX_H3_PIPELINE_FAMILY_ID,
-    ConsumerCandidateOrigin,
-    MiniMaxH3TransformerSkeletonFactory,
-)
+from .skeleton import ConsumerCandidateOrigin
 from .transfer import TransferPlanError
 
 
 class WeightAccessPreparationError(RuntimeError):
-    pass
+    def __init__(self, detail: str, *, code: str = "preparation_failed") -> None:
+        self.code = code
+        self.detail = detail
+        super().__init__(f"{code}: {detail}")
 
 
 class WeightAccessPreparationFallback(WeightAccessPreparationError):  # noqa: N818
-    pass
+    def __init__(
+        self,
+        detail: str,
+        *,
+        code: str = "optional_hwr_unavailable",
+        legacy_reason: LegacyReason = LegacyReason.OPTIONAL_ARTIFACT_UNAVAILABLE,
+    ) -> None:
+        self.legacy_reason = LegacyReason(legacy_reason)
+        super().__init__(detail, code=code)
 
 
 def _safe_exception_detail(exc: BaseException) -> str:
@@ -126,40 +117,13 @@ def _add_cleanup_note(
 def _raise_resolution_failure(
     outcome: RetryableFailure | FatalFailure,
 ) -> None:
-    message = f"{outcome.code}: {outcome.detail}"
     if isinstance(outcome, RetryableFailure):
-        raise WeightAccessPreparationFallback(message)
-    raise WeightAccessPreparationError(message)
-
-
-def _stable(value: Any) -> Any:
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, torch.dtype):
-        return str(value).removeprefix("torch.")
-    if isinstance(value, Mapping):
-        return {str(key): _stable(item) for key, item in sorted(value.items())}
-    if isinstance(value, (list, tuple)):
-        return [_stable(item) for item in value]
-    if isinstance(value, (set, frozenset)):
-        return sorted((_stable(item) for item in value), key=repr)
-    to_dict = getattr(value, "to_dict", None)
-    if callable(to_dict):
-        return _stable(to_dict())
-    if hasattr(value, "__dict__"):
-        return {
-            key: _stable(item)
-            for key, item in sorted(vars(value).items())
-            if not key.startswith("_") and not callable(item)
-        }
-    return f"{type(value).__module__}.{type(value).__qualname__}:{value}"
-
-
-def _package_version(name: str) -> str:
-    try:
-        return importlib.metadata.version(name)
-    except importlib.metadata.PackageNotFoundError:
-        return "source"
+        raise WeightAccessPreparationFallback(
+            outcome.detail,
+            code=outcome.code,
+            legacy_reason=LegacyReason.OPTIONAL_ARTIFACT_UNAVAILABLE,
+        )
+    raise WeightAccessPreparationError(outcome.detail, code=outcome.code)
 
 
 def _pre_resolve_process_memory() -> dict[str, int]:
@@ -175,20 +139,19 @@ def _pre_resolve_process_memory() -> dict[str, int]:
         result["minor_faults"] = int(fields[9])
         result["major_faults"] = int(fields[11])
     except (OSError, ValueError, IndexError) as exc:
-        raise WeightAccessPreparationError(f"pre_resolve_memory_unavailable: {type(exc).__name__}") from exc
+        raise WeightAccessPreparationError(
+            type(exc).__name__,
+            code="pre_resolve_memory_unavailable",
+        ) from exc
     private_kib = result.get("private_clean_kib", 0) + result.get("private_dirty_kib", 0)
     result["private_kib"] = private_kib
     result["private_and_locked_kib"] = private_kib + result.get("locked_kib", 0)
     if "pss_kib" not in result:
-        raise WeightAccessPreparationError("pre_resolve_memory_unavailable: smaps_rollup lacks Pss")
+        raise WeightAccessPreparationError(
+            "smaps_rollup lacks Pss",
+            code="pre_resolve_memory_unavailable",
+        )
     return result
-
-
-@dataclass(frozen=True)
-class DiffusionPipelineSpec:
-    pipeline_family_id: str
-    model_config_digest: str
-    normalized_init_config: Mapping[str, Any]
 
 
 def _validate_scope(od_config: OmniDiffusionConfig, device: torch.device) -> None:
@@ -202,7 +165,10 @@ def _validate_scope(od_config: OmniDiffusionConfig, device: torch.device) -> Non
         )
     )
     if selected != 1:
-        raise WeightAccessPreparationError("Host Weight Runtime requires exactly one offload strategy")
+        raise WeightAccessPreparationError(
+            "Host Weight Runtime requires exactly one offload strategy",
+            code="offload_strategy_invalid",
+        )
 
     unsupported: list[str] = []
     if int(getattr(parallel, "pipeline_parallel_size", 1)) != 1:
@@ -230,133 +196,11 @@ def _validate_scope(od_config: OmniDiffusionConfig, device: torch.device) -> Non
     if device.type != "cuda":
         unsupported.append("non-CUDA producer")
     if unsupported:
-        raise WeightAccessPreparationFallback("Host Weight Runtime v1 does not support " + ", ".join(unsupported))
-
-
-def _resolved_fp8_config(od_config: OmniDiffusionConfig) -> Fp8Config:
-    resolved = resolve_component_quant_config(
-        od_config.quantization_config,
-        "transformer",
-    )
-    if not isinstance(resolved, Fp8Config):
-        raise WeightAccessPreparationFallback("Host Weight Runtime v1 supports only transformer FP8 quantization")
-    if resolved.is_checkpoint_fp8_serialized:
-        raise WeightAccessPreparationFallback("Host Weight Runtime v1 requires online FP8 from a dense checkpoint")
-    if resolved.weight_block_size is not None:
-        raise WeightAccessPreparationFallback("Host Weight Runtime v1 excludes blockwise FP8")
-    if resolved.activation_scheme != "dynamic":
-        raise WeightAccessPreparationFallback("Host Weight Runtime v1 requires dynamic activation scaling")
-    if not cutlass_fp8_supported():
-        raise WeightAccessPreparationFallback("Host Weight Runtime v1 requires the Cutlass FP8 kernel")
-    return resolved
-
-
-def _weight_format_descriptor(
-    quant_config: Fp8Config,
-    device: torch.device,
-    runtime_dtype: torch.dtype,
-) -> WeightFormatDescriptor:
-    if not isinstance(runtime_dtype, torch.dtype):
-        raise WeightAccessPreparationError(
-            f"Host Weight Runtime requires a resolved torch dtype, got {runtime_dtype!r}"
+        raise WeightAccessPreparationFallback(
+            "Host Weight Runtime v1 does not support " + ", ".join(unsupported),
+            code="topology_unsupported",
+            legacy_reason=LegacyReason.OPTIONAL_CAPABILITY_UNAVAILABLE,
         )
-    runtime_dtype_name = str(runtime_dtype).removeprefix("torch.")
-    index = device.index
-    if index is None:
-        index = torch.cuda.current_device()  # noqa: TID251
-    major, minor = torch.cuda.get_device_capability(index)
-    normalized_config = {
-        "method": "fp8",
-        "activation_scheme": quant_config.activation_scheme,
-        "ignored_layers": sorted(quant_config.ignored_layers or []),
-        "is_checkpoint_fp8_serialized": False,
-        "store_dtype": quant_config.store_dtype,
-        "weight_block_size": None,
-        "input_dtype": runtime_dtype_name,
-        "runtime_dtype": runtime_dtype_name,
-    }
-    kernel_identity = {
-        "kernel_id": KERNEL_ID,
-        "alignment": 16,
-        "cuda_runtime": torch.version.cuda,
-        "compute_capability": [major, minor],
-        "torch_version": torch.__version__,
-        "vllm_version": _package_version("vllm"),
-    }
-    semantic = canonical_digest(
-        {
-            "format_id": FORMAT_ID,
-            "adapter_abi": FORMAT_ADAPTER_ABI,
-            "normalized_config": normalized_config,
-            "kernel_identity": kernel_identity,
-            "target_module_type_id": TARGET_MODULE_TYPE_ID,
-        }
-    )
-    format_plan_digest = derive_weight_format_plan_digest(
-        format_id=FORMAT_ID,
-        adapter_abi=FORMAT_ADAPTER_ABI,
-        semantic_fingerprint=semantic,
-        format_recipe_schema_version=FORMAT_RECIPE_SCHEMA_VERSION,
-        target_module_type_id=TARGET_MODULE_TYPE_ID,
-        normalized_config=normalized_config,
-        kernel_identity=kernel_identity,
-    )
-    return WeightFormatDescriptor(
-        format_id=FORMAT_ID,
-        adapter_abi=FORMAT_ADAPTER_ABI,
-        semantic_fingerprint=semantic,
-        format_plan_digest=format_plan_digest,
-        format_recipe_schema_version=FORMAT_RECIPE_SCHEMA_VERSION,
-        target_module_type_id=TARGET_MODULE_TYPE_ID,
-        normalized_config=normalized_config,
-        kernel_identity=kernel_identity,
-    )
-
-
-def _producer_descriptor() -> ProducerDescriptor:
-    fingerprint = canonical_digest(
-        {
-            "producer": "minimax_h3_fl2va_transformer",
-            "producer_abi": "1",
-            "target_module_type_id": TARGET_MODULE_TYPE_ID,
-            "loader": "DiffusersPipelineLoader/ordinary-stream-online-fp8",
-            "minimax_transforms": ["grouped_qkv_to_qkv", "fc1_gate_up"],
-            "torch": torch.__version__,
-            "vllm": _package_version("vllm"),
-            "vllm_omni": _package_version("vllm-omni"),
-        }
-    )
-    return ProducerDescriptor(
-        producer_id="vllm_omni.minimax_h3.fp8_transformer",
-        producer_abi="1",
-        semantic_fingerprint=fingerprint,
-    )
-
-
-def _pipeline_spec(od_config: OmniDiffusionConfig) -> DiffusionPipelineSpec:
-    config = od_config.tf_model_config
-    config_value = config.to_dict() if hasattr(config, "to_dict") else dict(config)
-    if not isinstance(od_config.dtype, torch.dtype):
-        raise WeightAccessPreparationError(
-            f"Host Weight Runtime requires a resolved torch dtype, got {od_config.dtype!r}"
-        )
-    runtime_dtype = str(od_config.dtype).removeprefix("torch.")
-    model_digest = canonical_digest(
-        {
-            "runtime_dtype": runtime_dtype,
-            "transformer_config": _stable(config_value),
-        }
-    )
-    return DiffusionPipelineSpec(
-        pipeline_family_id=MINIMAX_H3_PIPELINE_FAMILY_ID,
-        model_config_digest=model_digest,
-        normalized_init_config={
-            "partition": "fl2va",
-            "task_type": str(getattr(od_config, "task_type", "fl2va")),
-            "model_config_digest": model_digest,
-            "runtime_dtype": runtime_dtype,
-        },
-    )
 
 
 def _current_dp_rank(od_config: OmniDiffusionConfig) -> int:
@@ -413,21 +257,32 @@ class WeightAccessSessionFactory:
         producer_device: torch.device,
         builder_coordinator: BuilderCoordinator | None = None,
         dp_rank: int | None = None,
+        model_integration_registry: ModelIntegrationRegistry | None = None,
     ) -> None:
         self.od_config = od_config
         self.load_config = load_config
         self.producer_device = producer_device
         self._builder_coordinator = builder_coordinator
         self._dp_rank = dp_rank
+        self._model_integration_registry = (
+            model_integration_registry
+            if model_integration_registry is not None
+            else create_builtin_model_integration_registry()
+        )
+        if not isinstance(self._model_integration_registry, ModelIntegrationRegistry):
+            raise TypeError("model_integration_registry must be a ModelIntegrationRegistry")
         self.manifest: ArtifactManifest | None = None
         self.resolution_info: object | None = None
         self.resolution_evidence: HostWeightResolutionEvidence | None = None
 
     @staticmethod
     def _legacy_reason(error: BaseException) -> LegacyReason:
-        detail = _safe_exception_detail(error).lower()
-        if any(token in detail for token in ("unsupported", "requires", "capability", "topology")):
-            return LegacyReason.OPTIONAL_CAPABILITY_UNAVAILABLE
+        if isinstance(error, ModelIntegrationUnavailableError):
+            if error.legacy_classification is ModelIntegrationLegacyClassification.CAPABILITY:
+                return LegacyReason.OPTIONAL_CAPABILITY_UNAVAILABLE
+            return LegacyReason.OPTIONAL_ARTIFACT_UNAVAILABLE
+        if isinstance(error, WeightAccessPreparationFallback):
+            return error.legacy_reason
         return LegacyReason.OPTIONAL_ARTIFACT_UNAVAILABLE
 
     @staticmethod
@@ -435,9 +290,14 @@ class WeightAccessSessionFactory:
         code = getattr(error, "code", None)
         if isinstance(code, str) and code:
             return code
-        detail = _safe_exception_detail(error)
-        prefix, separator, _ = detail.partition(": ")
-        return prefix if separator and prefix else default
+        return default
+
+    @staticmethod
+    def _failure_detail(error: BaseException) -> str:
+        detail = getattr(error, "detail", None)
+        if isinstance(detail, str) and detail:
+            return detail
+        return _safe_exception_detail(error)
 
     def _publish_legacy_after_cleanup(
         self,
@@ -469,9 +329,7 @@ class WeightAccessSessionFactory:
             owner.publish_preparation_result(
                 RetryablePreparationFailure(
                     code="coordinated_fallback_required",
-                    detail=(
-                        f"{self._failure_code(error, 'optional_hwr_unavailable')}: {_safe_exception_detail(error)}"
-                    ),
+                    detail=f"{self._failure_code(error, 'optional_hwr_unavailable')}: {self._failure_detail(error)}",
                     cleanup_required=False,
                 )
             )
@@ -479,7 +337,7 @@ class WeightAccessSessionFactory:
         owner.publish_preparation_result(
             UseLegacy(
                 reason=self._legacy_reason(error),
-                detail=_safe_exception_detail(error),
+                detail=self._failure_detail(error),
             )
         )
 
@@ -499,7 +357,7 @@ class WeightAccessSessionFactory:
         owner.publish_preparation_result(
             FatalPreparationFailure(
                 code=self._failure_code(error, "preparation_failed"),
-                detail=_safe_exception_detail(error),
+                detail=self._failure_detail(error),
                 cleanup_required=cleanup_required,
             )
         )
@@ -508,7 +366,7 @@ class WeightAccessSessionFactory:
         self,
         *,
         owner: WeightConsumerOwner,
-        consumer_requirements: SessionRequirements,
+        consumer_requirements_factory: Callable[[str], SessionRequirements],
         pipeline_builder: Callable[[nn.Module], nn.Module],
     ) -> None:
         """Publish one closed preparation result into a preinstalled owner."""
@@ -518,27 +376,49 @@ class WeightAccessSessionFactory:
         spec: ArtifactSpec | None = None
         try:
             _validate_scope(self.od_config, self.producer_device)
-            source = resolve_minimax_h3_transformer_source(self.od_config)
-            pipeline_spec = _pipeline_spec(self.od_config)
-            _prepare_diffusion_quant_config(self.od_config, MiniMaxH3Pipeline)
-            quant_config = _resolved_fp8_config(self.od_config)
-            weight_format = _weight_format_descriptor(
-                quant_config,
-                self.producer_device,
-                self.od_config.dtype,
+            integration = self._model_integration_registry.select(self.od_config)
+            try:
+                consumer_requirements = consumer_requirements_factory(integration.capabilities.weight_format_id)
+            except Exception as exc:
+                raise WeightAccessPreparationError(
+                    f"consumer requirements factory raised {type(exc).__name__}: {_safe_exception_detail(exc)}",
+                    code="consumer_requirements_factory_failed",
+                ) from exc
+            if not isinstance(consumer_requirements, SessionRequirements):
+                raise WeightAccessPreparationError(
+                    "consumer requirements factory returned an unsupported value",
+                    code="consumer_requirements_invalid",
+                )
+            if consumer_requirements.required_weight_format_id != integration.capabilities.weight_format_id:
+                raise WeightAccessPreparationError(
+                    "consumer requirements changed the selected integration format",
+                    code="consumer_weight_format_mismatch",
+                )
+            self._model_integration_registry.validate_transfer_plan(
+                integration,
+                consumer_requirements.required_transfer_plan_kind,
             )
-            if consumer_requirements.required_weight_format_id != weight_format.format_id:
-                raise WeightAccessPreparationError("consumer requirements select a different finalized weight format")
             if consumer_requirements.host_copy_mode is not HostCopyMode.SYNCHRONOUS:
-                raise WeightAccessPreparationFallback("Host Weight Runtime v1 requires synchronous host reads")
+                raise WeightAccessPreparationFallback(
+                    "Host Weight Runtime v1 requires synchronous host reads",
+                    code="host_copy_mode_unsupported",
+                    legacy_reason=LegacyReason.OPTIONAL_CAPABILITY_UNAVAILABLE,
+                )
+            prepared_model = integration.prepare(self.od_config, self.producer_device)
+            weight_format = prepared_model.weight_format
+            if consumer_requirements.required_weight_format_id != weight_format.format_id:
+                raise WeightAccessPreparationError(
+                    "consumer requirements select a different finalized weight format",
+                    code="consumer_weight_format_mismatch",
+                )
             spec = ArtifactSpec(
                 source_fingerprint=canonical_digest(
                     {
-                        "checkpoint_source": source.source_fingerprint,
-                        "model_config": pipeline_spec.model_config_digest,
+                        "checkpoint_source": prepared_model.source.source_fingerprint,
+                        "model_config": prepared_model.pipeline_spec.model_config_digest,
                     }
                 ),
-                producer=_producer_descriptor(),
+                producer=prepared_model.producer_descriptor,
                 weight_format=weight_format,
                 topology=ArtifactTopologyDescriptor(
                     (
@@ -546,7 +426,7 @@ class WeightAccessSessionFactory:
                         TopologyCoordinate("tp", 1, 0),
                     )
                 ),
-                layout_abi="minimax_h3_dit_runtime/v1",
+                layout_abi=integration.capabilities.artifact_layout_abi,
             )
 
             mode = str(self.od_config.host_weight_runtime_mode)
@@ -581,11 +461,9 @@ class WeightAccessSessionFactory:
             prepared = self._prepare_with_runtime(
                 runtime=runtime,
                 cleanup_handle=cleanup,
-                source=source,
+                integration=integration,
+                prepared_model=prepared_model,
                 spec=spec,
-                pipeline_spec=pipeline_spec,
-                quant_config=quant_config,
-                weight_format=weight_format,
                 mode=mode,
                 composition=composition,
                 pipeline_builder=pipeline_builder,
@@ -594,8 +472,8 @@ class WeightAccessSessionFactory:
             cleanup.transfer_to_prepared_session(prepared)
             owner.publish_preparation_result(PreparedSessionReady(prepared))
         except (
-            DiffusionArtifactProducerError,
             BuildCoordinationError,
+            ModelIntegrationUnavailableError,
             OSError,
             WeightAccessPreparationFallback,
         ) as exc:
@@ -616,11 +494,9 @@ class WeightAccessSessionFactory:
         *,
         runtime: HostWeightRuntime,
         cleanup_handle: PreparationCleanupHandle,
-        source: Any,
+        integration: HostWeightModelIntegrationBundle,
+        prepared_model: PreparedModelIntegration,
         spec: ArtifactSpec,
-        pipeline_spec: DiffusionPipelineSpec,
-        quant_config: Fp8Config,
-        weight_format: WeightFormatDescriptor,
         mode: str,
         composition: BuildComposition,
         pipeline_builder: Callable[[nn.Module], nn.Module],
@@ -632,21 +508,31 @@ class WeightAccessSessionFactory:
                 kind.value: sorted(feature.value for feature in features)
                 for kind, features in capability.missing_features_by_backing.items()
             }
-            raise WeightAccessPreparationFallback(f"{capability.reason_code}: missing={missing}")
+            raise WeightAccessPreparationFallback(
+                f"missing={missing}",
+                code=capability.reason_code,
+                legacy_reason=LegacyReason.OPTIONAL_CAPABILITY_UNAVAILABLE,
+            )
         if not isinstance(capability, CapabilityGrant):
-            raise WeightAccessPreparationError(f"runtime returned an unknown capability decision {capability!r}")
+            raise WeightAccessPreparationError(
+                f"runtime returned an unknown capability decision {capability!r}",
+                code="capability_decision_invalid",
+            )
 
-        format_adapter = Fp8PerTensorFormatAdapter(weight_format)
+        weight_format = prepared_model.weight_format
+        format_adapter = prepared_model.format_adapter
         producer = None
         if composition.producer_allowed:
-            producer = DiffusionArtifactProducer(
-                spec=spec,
-                od_config=self.od_config,
-                source=source,
-                device=self.producer_device,
-                quant_config=quant_config,
-                format_adapter=format_adapter,
-                load_config=self.load_config,
+            producer = integration.create_producer(
+                ProducerFactoryContext(
+                    spec=spec,
+                    od_config=self.od_config,
+                    source=prepared_model.source,
+                    device=self.producer_device,
+                    quant_config=prepared_model.quant_config,
+                    format_adapter=format_adapter,
+                    load_config=self.load_config,
+                )
             )
         pre_resolve = _pre_resolve_process_memory()
         outcome = runtime.resolve(
@@ -679,7 +565,10 @@ class WeightAccessSessionFactory:
             features=capability.features,
         )
         if outcome.access != expected_access:
-            raise WeightAccessPreparationError("resolved access does not match the negotiated capability grant")
+            raise WeightAccessPreparationError(
+                "resolved access does not match the negotiated capability grant",
+                code="resolved_access_mismatch",
+            )
         self.manifest = artifact.manifest
         self.resolution_info = outcome.info
         self.resolution_evidence = evidence_from_outcome(
@@ -688,10 +577,12 @@ class WeightAccessSessionFactory:
             expected_artifact_key=spec.artifact_key,
             artifact_compatibility_digest=artifact.manifest.compatibility_digest,
         )
-        skeleton_factory = MiniMaxH3TransformerSkeletonFactory(
-            self.od_config,
-            quant_config=quant_config,
-            pipeline_factory=lambda **kwargs: pipeline_builder(kwargs["transformer"]),
+        skeleton_factory = integration.create_skeleton_factory(
+            SkeletonFactoryContext(
+                od_config=self.od_config,
+                quant_config=prepared_model.quant_config,
+                pipeline_builder=pipeline_builder,
+            )
         )
         if outcome.info.path.value == "mmap_built":
             origin = ConsumerCandidateOrigin.BUILDER_REBIND
@@ -700,7 +591,7 @@ class WeightAccessSessionFactory:
         else:
             origin = ConsumerCandidateOrigin.WARM_HIT
         candidate = skeleton_factory.create_candidate(
-            pipeline_spec,
+            prepared_model.pipeline_spec,
             weight_format,
             origin,
             spec.artifact_key,
@@ -710,8 +601,8 @@ class WeightAccessSessionFactory:
         binder = DiffusionConsumerBinder(
             target_module_type=skeleton_factory.target_module_type,
         )
-        # The logical manifest provides exact recipe coverage before final
-        # FP8 shapes have been hydrated into the meta skeleton.
+        # The logical manifest provides exact recipe coverage before the
+        # bundle-owned finalized shapes are hydrated into the meta skeleton.
         prepared_binding = binder.prepare(
             skeleton,
             artifact.manifest,
@@ -726,14 +617,21 @@ class WeightAccessSessionFactory:
         )
         set_catalog = getattr(prepared_binding, "set_transfer_catalog", None)
         if not callable(set_catalog):
-            raise WeightAccessPreparationError("consumer binder cannot accept the finalized transfer catalog")
+            raise WeightAccessPreparationError(
+                "consumer binder cannot accept the finalized transfer catalog",
+                code="consumer_catalog_unsupported",
+            )
         set_catalog(compiled.transfer_catalog)
         prepared_binding.validate()
 
         try:
             transfer_plan = compiled.transfer_catalog.plan_for_kind(consumer_requirements.required_transfer_plan_kind)
         except TransferPlanError as exc:
-            raise WeightAccessPreparationFallback(str(exc)) from exc
+            raise WeightAccessPreparationFallback(
+                str(exc),
+                code="transfer_plan_unavailable",
+                legacy_reason=LegacyReason.OPTIONAL_CAPABILITY_UNAVAILABLE,
+            ) from exc
         selected_kinds = frozenset(
             compiled.transfer_catalog.unit(unit_id).unit_kind for unit_id in transfer_plan.unit_ids
         )
@@ -762,7 +660,10 @@ class WeightAccessSessionFactory:
         if composition.authorization.observed_start is not None:
             observed_builder_started = asdict(composition.authorization.observed_start)
         if self.resolution_evidence is None:
-            raise WeightAccessPreparationError("ready resolution did not produce Host Weight Runtime evidence")
+            raise WeightAccessPreparationError(
+                "ready resolution did not produce Host Weight Runtime evidence",
+                code="resolution_evidence_missing",
+            )
         self.resolution_evidence = replace(
             self.resolution_evidence,
             negotiated_capability_grant_id=capability.grant_id,

@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import Enum
+from typing import Any, Protocol
 
 import torch
 
@@ -33,6 +35,35 @@ class ConsumerLifecyclePhase(str, Enum):
     ACTIVE = "active"
     QUIESCING = "quiescing"
     CLOSED = "closed"
+
+
+class HostWeightOffloadBackend(Protocol):
+    """Lifecycle contract for an offloader backed by one prepared session.
+
+    ``adopt_prepared_session`` is the ownership boundary.  On success, the
+    backend owns the exact session and ``disable`` must release it even when
+    ``enable`` has not completed.  On failure, adoption must retain no
+    reference and the caller remains responsible for rollback.  A failing
+    ``disable`` retains backend ownership so the same cleanup can be retried.
+    """
+
+    def adopt_prepared_session(self, prepared: PreparedWeightAccessSession) -> None:
+        """Atomically adopt ``prepared`` without performing backend enablement."""
+
+    def enable(self, pipeline: Any) -> None:
+        """Enable scheduling after prepared-session ownership was adopted."""
+
+    def disable(self) -> None:
+        """Release all session state, retaining ownership if cleanup fails."""
+
+    def is_enabled(self) -> bool:
+        """Return whether execution-time offload scheduling is enabled."""
+
+    def host_weight_diagnostics(self) -> Mapping[str, object]:
+        """Return backend allocation and in-flight event diagnostics."""
+
+    def host_weight_session_idle_state(self) -> Mapping[str, object]:
+        """Return active-session idle state without exposing the session."""
 
 
 def _add_cleanup_note(
@@ -66,7 +97,7 @@ class BuiltinOffloadWeightConsumer(WeightConsumer):
         self._device = device
         self._pipeline = pipeline
         self._prepared: PreparedWeightAccessSession | None = None
-        self._backend: object | None = None
+        self._backend: HostWeightOffloadBackend | None = None
         self._phase = ConsumerLifecyclePhase.PREPARED
 
     @property
@@ -74,7 +105,7 @@ class BuiltinOffloadWeightConsumer(WeightConsumer):
         return self._phase
 
     @property
-    def backend(self) -> object:
+    def backend(self) -> HostWeightOffloadBackend:
         if self._backend is None:
             raise RuntimeError("offload backend has not been constructed")
         return self._backend
@@ -94,18 +125,8 @@ class BuiltinOffloadWeightConsumer(WeightConsumer):
                     "events": 0,
                 },
             }
-        backend_snapshot = getattr(backend, "host_weight_diagnostics", None)
-        if not callable(backend_snapshot):
-            raise RuntimeError(f"{type(backend).__name__} does not expose host-weight diagnostics")
-        snapshot = dict(backend_snapshot())
-        session = getattr(backend, "_weight_session", None)
-        if session is None:
-            session_state: dict[str, object] = {
-                "outstanding_units": 0,
-                "bindings": 0,
-            }
-        else:
-            session_state = dict(session.idle_state())
+        snapshot = dict(backend.host_weight_diagnostics())
+        session_state = dict(backend.host_weight_session_idle_state())
         session_state["events"] = int(snapshot.pop("events", 0))
         snapshot["idle_state"] = session_state
         return snapshot
@@ -116,7 +137,7 @@ class BuiltinOffloadWeightConsumer(WeightConsumer):
             raise RuntimeError("weight consumer already owns a prepared session")
         self._prepared = prepared
 
-    def _build_backend(self, prepared: PreparedWeightAccessSession) -> object:
+    def _build_backend(self) -> HostWeightOffloadBackend:
         strategy = self._config.strategy
         if strategy is OffloadStrategy.MODEL_LEVEL:
             from .sequential_backend import ModelLevelOffloadBackend
@@ -124,7 +145,6 @@ class BuiltinOffloadWeightConsumer(WeightConsumer):
             return ModelLevelOffloadBackend(
                 self._config,
                 self._device,
-                prepared_weight_session=prepared,
             )
         if strategy is OffloadStrategy.LAYER_WISE:
             from .layerwise_backend import LayerWiseOffloadBackend
@@ -132,7 +152,6 @@ class BuiltinOffloadWeightConsumer(WeightConsumer):
             return LayerWiseOffloadBackend(
                 self._config,
                 self._device,
-                prepared_weight_session=prepared,
             )
         if strategy is OffloadStrategy.DISTRIBUTED_LAYER_WISE:
             from .distributed_layerwise_backend import (
@@ -143,7 +162,6 @@ class BuiltinOffloadWeightConsumer(WeightConsumer):
                 self._config,
                 self._device,
                 host_weight_plan=None,
-                prepared_weight_session=prepared,
             )
         raise RuntimeError(f"offload strategy {strategy.value!r} is not an HWR weight consumer")
 
@@ -156,13 +174,14 @@ class BuiltinOffloadWeightConsumer(WeightConsumer):
         if prepared is None:
             raise RuntimeError("weight consumer has no adopted prepared session")
         try:
-            backend = self._build_backend(prepared)
-            # Internal authority marker: from here disable delegates to the
-            # exact backend, which supports cleanup before enable completes.
+            backend = self._build_backend()
+            # Adoption performs validation before retaining the exact session.
+            # The publication below contains no fallible backend work: after
+            # it, disable delegates cleanup to the sole backend owner.
+            backend.adopt_prepared_session(prepared)
             self._backend = backend
             self._prepared = None
-            enable = getattr(backend, "enable")
-            enable(self._pipeline)
+            backend.enable(self._pipeline)
             self._phase = ConsumerLifecyclePhase.ACTIVE
         except BaseException as primary:
             try:
@@ -177,8 +196,7 @@ class BuiltinOffloadWeightConsumer(WeightConsumer):
         self._phase = ConsumerLifecyclePhase.QUIESCING
         backend = self._backend
         if backend is not None:
-            disable = getattr(backend, "disable")
-            disable()
+            backend.disable()
             if self._backend is backend:
                 self._backend = None
             self._pipeline = None
@@ -252,4 +270,5 @@ __all__ = [
     "BuiltinOffloadWeightConsumer",
     "BuiltinOffloadWeightConsumerFactory",
     "ConsumerLifecyclePhase",
+    "HostWeightOffloadBackend",
 ]

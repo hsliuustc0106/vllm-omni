@@ -15,6 +15,15 @@ from vllm_omni.diffusion.host_weight.evidence import (
     HostWeightResolutionEvidence,
 )
 from vllm_omni.diffusion.host_weight.formats.fp8_per_tensor import FORMAT_ID
+from vllm_omni.diffusion.host_weight.model_integration import (
+    HOST_WEIGHT_MODEL_INTEGRATION_ABI,
+    HostWeightModelIntegrationBundle,
+    ModelIntegrationCapabilities,
+    ModelIntegrationLegacyClassification,
+    ModelIntegrationRegistry,
+    ModelIntegrationSupportDecision,
+    ModelIntegrationUnavailableError,
+)
 from vllm_omni.diffusion.host_weight.ownership import (
     FatalPreparationFailure,
     LegacyReason,
@@ -22,12 +31,22 @@ from vllm_omni.diffusion.host_weight.ownership import (
     RetryablePreparationFailure,
     UseLegacy,
 )
+from vllm_omni.diffusion.host_weight.session import (
+    HostCopyMode,
+    SessionRequirements,
+)
 from vllm_omni.diffusion.host_weight.session_factory import (
     WeightAccessPreparationError,
     WeightAccessPreparationFallback,
 )
+from vllm_omni.diffusion.host_weight.transfer import TransferPlanKind
 from vllm_omni.diffusion.model_loader.diffusers_loader import (
     DiffusersPipelineLoader,
+)
+from vllm_omni.host_weight_runtime import (
+    AccessFeature,
+    AccessRequirements,
+    BackingKind,
 )
 
 pytestmark = [pytest.mark.core_model, pytest.mark.diffusion, pytest.mark.cpu]
@@ -86,10 +105,24 @@ class _Owner:
 class _ConsumerFactory:
     def __init__(self) -> None:
         self.requested_format_ids: list[str] = []
-        self.requirement = object()
+        self.requirement: SessionRequirements | None = None
 
-    def requirements(self, required_weight_format_id: str) -> object:
+    def requirements(self, required_weight_format_id: str) -> SessionRequirements:
         self.requested_format_ids.append(required_weight_format_id)
+        self.requirement = SessionRequirements(
+            access=AccessRequirements(
+                required_features=frozenset(
+                    {
+                        AccessFeature.COMPLETE_TENSOR_READ,
+                        AccessFeature.SHARED_PAGES,
+                    }
+                ),
+                accepted_backings=frozenset({BackingKind.RUNTIME_MMAP}),
+            ),
+            required_transfer_plan_kind=TransferPlanKind.COMPONENT,
+            required_weight_format_id=required_weight_format_id,
+            host_copy_mode=HostCopyMode.SYNCHRONOUS,
+        )
         return self.requirement
 
 
@@ -125,6 +158,7 @@ class _MixedPipeline(nn.Module):
 class _ReadySessionFactory:
     last: _ReadySessionFactory | None = None
     evidence_override: object | None = None
+    selected_format_id = FORMAT_ID
 
     def __init__(self, **_kwargs) -> None:
         self.manifest = SimpleNamespace(tensors=(SimpleNamespace(tensor_id="weight"),))
@@ -151,11 +185,11 @@ class _ReadySessionFactory:
         self,
         *,
         owner: _Owner,
-        consumer_requirements: object,
+        consumer_requirements_factory,
         pipeline_builder,
     ) -> None:
         self.owner = owner
-        self.consumer_requirements = consumer_requirements
+        self.consumer_requirements = consumer_requirements_factory(self.selected_format_id)
         transformer = nn.Linear(2, 2, bias=False)
         pipeline = pipeline_builder(transformer)
         assert pipeline.transformer is transformer
@@ -206,6 +240,7 @@ def _install_ready_factory(monkeypatch) -> None:
 
     _ReadySessionFactory.last = None
     _ReadySessionFactory.evidence_override = None
+    _ReadySessionFactory.selected_format_id = FORMAT_ID
     monkeypatch.setattr(
         factory_module,
         "WeightAccessSessionFactory",
@@ -232,10 +267,11 @@ def _install_result_factory(
             self,
             *,
             owner: _Owner,
-            consumer_requirements: object,
+            consumer_requirements_factory,
             pipeline_builder,
         ) -> None:
-            del consumer_requirements, pipeline_builder
+            consumer_requirements_factory(FORMAT_ID)
+            del pipeline_builder
             owner.publish_preparation_result(result)
 
     monkeypatch.setattr(factory_module, "WeightAccessSessionFactory", ResultFactory)
@@ -324,6 +360,99 @@ def test_hwr_prepares_into_owner_before_non_artifact_source_iteration(
     assert evidence["events"] == ["cache_hit", "ready"]
     assert evidence["artifact_key"] == "a" * 64
     assert loader.take_host_weight_runtime_evidence() is None
+
+
+def test_real_session_factory_selects_alternate_format_through_loader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vllm_omni.diffusion.host_weight.session_factory as factory_module
+
+    events: list[str] = []
+
+    def bundle(
+        *,
+        format_id: str,
+        quantization_method: str,
+    ) -> HostWeightModelIntegrationBundle:
+        def probe(config: object) -> ModelIntegrationSupportDecision:
+            events.append(f"probe:{format_id}")
+            if getattr(config, "quantization_config", None) == quantization_method:
+                return ModelIntegrationSupportDecision.accepted()
+            return ModelIntegrationSupportDecision.rejected(
+                "weight_format_unsupported",
+                f"requires {quantization_method!r}",
+            )
+
+        def stop_after_selection(_config: object) -> object:
+            events.append(f"source:{format_id}")
+            raise ModelIntegrationUnavailableError(
+                "test_source_stop",
+                "stop after alternate-format selection",
+                legacy_classification=ModelIntegrationLegacyClassification.ARTIFACT,
+            )
+
+        def unused(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("selection-only bundle advanced past its source boundary")
+
+        return HostWeightModelIntegrationBundle(
+            integration_id=f"test.second_pipeline.{format_id}",
+            integration_abi=HOST_WEIGHT_MODEL_INTEGRATION_ABI,
+            capabilities=ModelIntegrationCapabilities(
+                model_class_names=frozenset({"SecondPipeline"}),
+                pipeline_family_id="second_pipeline",
+                weight_format_id=format_id,
+                target_module_type_id="test_second_pipeline/v1",
+                artifact_layout_abi=f"test_second_pipeline/{format_id}/v1",
+                supported_transfer_plan_kinds=frozenset({TransferPlanKind.COMPONENT}),
+            ),
+            support_probe=probe,
+            source_resolver=stop_after_selection,  # type: ignore[arg-type]
+            pipeline_spec_factory=unused,  # type: ignore[arg-type]
+            quantization_preparer=unused,  # type: ignore[arg-type]
+            weight_format_factory=unused,  # type: ignore[arg-type]
+            format_adapter_factory=unused,  # type: ignore[arg-type]
+            producer_descriptor_factory=unused,  # type: ignore[arg-type]
+            producer_factory=unused,  # type: ignore[arg-type]
+            skeleton_factory=unused,  # type: ignore[arg-type]
+        )
+
+    registry = ModelIntegrationRegistry(
+        (
+            bundle(format_id="test_dense", quantization_method="dense"),
+            bundle(
+                format_id="test_alternate",
+                quantization_method="alternate",
+            ),
+        )
+    )
+    monkeypatch.setattr(factory_module, "_validate_scope", lambda *_args: None)
+    monkeypatch.setattr(
+        factory_module,
+        "create_builtin_model_integration_registry",
+        lambda: registry,
+    )
+    loader, owner, consumer_factory = _loader(quantization_config="alternate")
+    loader.od_config.model_class_name = "SecondPipeline"
+
+    with pytest.raises(
+        WeightAccessPreparationFallback,
+        match="stop after alternate-format selection",
+    ):
+        loader._load_model_with_host_weight_runtime(
+            target_device=torch.device("cpu"),
+            producer_device=torch.device("cpu"),
+            offload_after_quant=False,
+        )
+
+    assert consumer_factory.requested_format_ids == ["test_alternate"]
+    assert events == [
+        "probe:test_dense",
+        "probe:test_alternate",
+        "source:test_alternate",
+    ]
+    result = owner.preparation_result
+    assert isinstance(result, UseLegacy)
+    assert result.reason is LegacyReason.OPTIONAL_ARTIFACT_UNAVAILABLE
 
 
 def test_non_artifact_failure_leaves_ready_session_owned_until_owner_close(

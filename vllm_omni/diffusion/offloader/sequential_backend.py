@@ -573,12 +573,22 @@ class ModelLevelOffloadBackend(OffloadBackend):
         super().__init__(config, device)
         self._offload_modules: list[nn.Module] = []  # Track modules with hooks
         self._custom_pipeline: nn.Module | None = None
-        self._prepared_weight_session = prepared_weight_session
+        self._prepared_weight_session: PreparedWeightAccessSession | None = None
         self._weight_session: WeightAccessSession | None = None
-        self._uses_weight_session = prepared_weight_session is not None
+        self._uses_weight_session = False
         self._host_weight_terminal = False
         self._host_weight_teardown_phase = _SessionTeardownPhase.ACTIVE
         self._host_weight_controller: _HostWeightComponentController | None = None
+        if prepared_weight_session is not None:
+            self.adopt_prepared_session(prepared_weight_session)
+
+    def adopt_prepared_session(self, prepared: PreparedWeightAccessSession) -> None:
+        """Atomically take cleanup authority for one prepared HWR session."""
+
+        if self.enabled or self._uses_weight_session or self._host_weight_terminal:
+            raise RuntimeError("model-level offloader already owns host-weight session state")
+        self._prepared_weight_session = prepared
+        self._uses_weight_session = True
 
     def enable(self, pipeline: nn.Module) -> None:
         if self.enabled:
@@ -902,3 +912,16 @@ class ModelLevelOffloadBackend(OffloadBackend):
             "pinned_slot_budget_bytes": _pinned_cpu_storage_bytes(staging),
             "events": 0,
         }
+
+    def host_weight_session_idle_state(self) -> dict[str, object]:
+        """Return session state without exposing the ownership-bearing handle."""
+
+        session = self._weight_session
+        if session is None:
+            return {
+                "outstanding_units": 0,
+                "bindings": 0,
+                "resident_bindings": 0,
+                "total_bindings": 0,
+            }
+        return dict(session.idle_state())

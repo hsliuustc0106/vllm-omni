@@ -397,6 +397,9 @@ def test_typed_diffusion_engine_args_use_structured_diffusion_config(tmp_path):
         deploy,
         model,
         cli_overrides={
+            "stage_2_enable_cpu_offload": True,
+            "stage_2_host_weight_runtime_mode": "read_write",
+            "stage_2_host_weight_runtime_root": str(tmp_path / "host-weights"),
             "stage_2_host_weight_runtime_required": True,
             "stage_2_host_weight_runtime_wait_timeout_s": 17.5,
         },
@@ -421,6 +424,13 @@ def test_typed_diffusion_engine_args_use_structured_diffusion_config(tmp_path):
     assert isinstance(typed_args["diffusion_attention_config"], AttentionConfig)
     assert typed_args["diffusion_attention_config"].default.backend == "FLASH_ATTN"
     assert typed_args["diffusion_attention_config"].per_role["cross"].backend == "TORCH_SDPA"
+    assert typed_args["enable_cpu_offload"] is legacy_args["enable_cpu_offload"] is True
+    assert typed_args["host_weight_runtime_mode"] == legacy_args["host_weight_runtime_mode"] == "read_write"
+    assert (
+        typed_args["host_weight_runtime_root"]
+        == legacy_args["host_weight_runtime_root"]
+        == str(tmp_path / "host-weights")
+    )
     assert typed_args["host_weight_runtime_required"] is legacy_args["host_weight_runtime_required"] is True
     assert typed_args["host_weight_runtime_wait_timeout_s"] == legacy_args["host_weight_runtime_wait_timeout_s"] == 17.5
 
