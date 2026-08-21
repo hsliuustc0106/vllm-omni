@@ -7,10 +7,11 @@ from __future__ import annotations
 import ast
 import math
 from pathlib import Path
+from typing import get_type_hints
 
 import pytest
 
-from vllm_omni.model_executor.host_weight_runtime import (
+from vllm_omni.host_weight_runtime import (
     AdaptationIdentity,
     CanonicalJson,
     ComponentIdentity,
@@ -18,6 +19,7 @@ from vllm_omni.model_executor.host_weight_runtime import (
     IdentityValidationError,
     ManifestValidationError,
     ProducerIdentity,
+    ProductionPolicy,
     PublicationMarker,
     RuntimeWeightLayout,
     TensorKind,
@@ -25,6 +27,8 @@ from vllm_omni.model_executor.host_weight_runtime import (
     WeightArtifactIdentity,
     WeightManifest,
     WeightRepresentation,
+    WeightRestorePlan,
+    WeightRestorer,
     WeightSourceIdentity,
 )
 
@@ -132,6 +136,17 @@ def test_identity_schema_does_not_coerce_field_types() -> None:
         WeightArtifactIdentity.from_dict(document)
 
 
+def test_restoration_contract_has_a_validation_only_one_shot_commit_boundary() -> None:
+    assert get_type_hints(WeightRestorePlan.commit)["return"] is type(None)
+    assert "one-shot" in (WeightRestorePlan.__doc__ or "")
+    assert "without mutating" in (WeightRestorer.__doc__ or "")
+
+
+def test_post_load_publication_policy_is_explicitly_unsupported() -> None:
+    with pytest.raises(ValueError, match="post-load publication is not implemented"):
+        ProductionPolicy(allow_post_load_publish=True)
+
+
 def test_manifest_and_publication_marker_round_trip_exactly() -> None:
     identity = _identity()
     manifest = WeightManifest(
@@ -189,7 +204,8 @@ def test_manifest_rejects_unsafe_payload_names(file_name: str) -> None:
 
 
 def test_package_source_keeps_the_neutral_dependency_boundary() -> None:
-    package_root = Path(__file__).parents[3] / "vllm_omni" / "model_executor" / "host_weight_runtime"
+    package_root = Path(__file__).resolve().parents[2] / "vllm_omni" / "host_weight_runtime"
+    assert package_root.is_dir()
     forbidden = (
         "vllm_omni.diffusion",
         "vllm_omni.distributed",

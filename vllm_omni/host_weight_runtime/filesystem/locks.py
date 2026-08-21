@@ -22,6 +22,7 @@ class FileLock:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self._fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        self._creator_pid = os.getpid()
         self._closed = False
         operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         if nonblocking:
@@ -74,6 +75,12 @@ class FileLock:
         if self._closed:
             return
         self._closed = True
+        if os.getpid() != self._creator_pid:
+            # flock state belongs to the inherited open-file description. A
+            # child must only drop its descriptor reference; LOCK_UN would
+            # release the creator process's active lock as well.
+            os.close(self._fd)
+            return
         try:
             fcntl.flock(self._fd, fcntl.LOCK_UN)
         finally:

@@ -37,6 +37,7 @@ class DomainInspection:
     scope: str
     domain_id: str
     storage_class: str
+    filesystem_type: str
     policy_version: int
     store_bytes: int
     filesystem_free_bytes: int

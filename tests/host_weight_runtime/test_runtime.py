@@ -9,10 +9,12 @@ from pathlib import Path
 import pytest
 import torch
 
-from vllm_omni.model_executor.host_weight_runtime import (
+from vllm_omni.host_weight_runtime import (
     AdaptationIdentity,
     CanonicalJson,
     ComponentIdentity,
+    FailureCode,
+    HostWeightFailure,
     HostWeightRuntime,
     HostWeightRuntimeConfig,
     IntegrityPolicy,
@@ -24,9 +26,12 @@ from vllm_omni.model_executor.host_weight_runtime import (
     RemoteOnMiss,
     ResolutionOutcome,
     ResolutionReport,
+    ResolutionStage,
     RuntimeMode,
     RuntimeWeightLayout,
     StorageDomainPolicy,
+    StoreResult,
+    StoreStatus,
     TensorWriteSpec,
     ValidationLevel,
     WeightArtifactIdentity,
@@ -34,7 +39,7 @@ from vllm_omni.model_executor.host_weight_runtime import (
     WeightRepresentation,
     WeightSourceIdentity,
 )
-from vllm_omni.model_executor.host_weight_runtime.filesystem import detect_storage_class
+from vllm_omni.host_weight_runtime.filesystem import detect_storage_class
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -159,7 +164,7 @@ def test_local_production_then_exact_warm_hit_emits_one_terminal_report_each(tmp
 @pytest.mark.parametrize(
     ("mode", "expected"),
     [
-        (RuntimeMode.PREFERRED, ResolutionOutcome.CANONICAL_FALLBACK),
+        (RuntimeMode.PREFERRED, ResolutionOutcome.FAILED),
         (RuntimeMode.REQUIRED, ResolutionOutcome.FAILED),
     ],
 )
@@ -188,8 +193,7 @@ def test_remote_required_is_explicitly_unsupported_and_skips_local_production(
     assert [attempt.stage.value for attempt in resolution.report.attempts] == ["lookup", "remote"]
     assert resolution.report.attempts[-1].failure is not None
     assert resolution.report.attempts[-1].failure.code.value == "unsupported"
-    expected_action = "canonical_fallback" if mode is RuntimeMode.PREFERRED else "fail_startup"
-    assert resolution.report.attempts[-1].action.value == expected_action
+    assert resolution.report.attempts[-1].action.value == "fail_startup"
 
 
 def test_observer_failure_cannot_change_resolution_outcome(tmp_path: Path) -> None:
@@ -244,6 +248,90 @@ def test_retryable_store_initialization_failure_obeys_runtime_mode(
     assert resolution.report.attempts[0].failure is not None
     assert resolution.report.attempts[0].failure.code.value == "domain_unavailable"
     assert resolution.report.attempts[0].failure.retryable
+
+
+@pytest.mark.parametrize(
+    ("stage", "code"),
+    [
+        (ResolutionStage.PRODUCTION, FailureCode.PRODUCER_UNSUPPORTED),
+        (ResolutionStage.VALIDATION, FailureCode.IDENTITY_COLLISION),
+        (ResolutionStage.LIFECYCLE, FailureCode.PUBLICATION_FAILED),
+    ],
+)
+def test_nonretryable_post_initialization_failure_cannot_fall_back_in_preferred_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: ResolutionStage,
+    code: FailureCode,
+) -> None:
+    identity = _identity()
+    runtime = HostWeightRuntime.from_config(
+        HostWeightRuntimeConfig(mode=RuntimeMode.PREFERRED, domain=_domain(tmp_path / code.value))
+    )
+    assert runtime.store is not None
+
+    def fail_production(
+        _request: object,
+        _producer: object,
+        *,
+        validation: object,
+        deadline: float,
+    ) -> StoreResult:
+        del validation, deadline
+        return StoreResult(
+            StoreStatus.FAILED,
+            failure=HostWeightFailure(
+                stage=stage,
+                code=code,
+                retryable=False,
+                message="injected nonretryable production failure",
+                details=CanonicalJson.empty(),
+            ),
+        )
+
+    monkeypatch.setattr(runtime.store, "get_or_build", fail_production)
+    resolution = runtime.resolve(identity, producer=CountingProducer(identity))
+
+    assert resolution.report.outcome is ResolutionOutcome.FAILED
+    assert resolution.report.attempts[-1].action.value == "fail_startup"
+    assert resolution.report.attempts[-1].failure is not None
+    assert resolution.report.attempts[-1].failure.code is code
+
+
+def test_retryable_post_initialization_failure_can_fall_back_in_preferred_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = _identity()
+    runtime = HostWeightRuntime.from_config(
+        HostWeightRuntimeConfig(mode=RuntimeMode.PREFERRED, domain=_domain(tmp_path / "retryable"))
+    )
+    assert runtime.store is not None
+
+    def fail_production(
+        _request: object,
+        _producer: object,
+        *,
+        validation: object,
+        deadline: float,
+    ) -> StoreResult:
+        del validation, deadline
+        return StoreResult(
+            StoreStatus.FAILED,
+            failure=HostWeightFailure(
+                stage=ResolutionStage.CAPACITY,
+                code=FailureCode.ENOSPC,
+                retryable=True,
+                message="injected recoverable capacity failure",
+                details=CanonicalJson.empty(),
+            ),
+        )
+
+    monkeypatch.setattr(runtime.store, "get_or_build", fail_production)
+    resolution = runtime.resolve(identity, producer=CountingProducer(identity))
+
+    assert resolution.report.outcome is ResolutionOutcome.CANONICAL_FALLBACK
+    assert resolution.report.attempts[-1].action.value == "canonical_fallback"
 
 
 def test_nonretryable_store_configuration_failure_remains_visible_in_preferred_mode(tmp_path: Path) -> None:

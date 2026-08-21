@@ -18,6 +18,7 @@ implementation contract; it is not, by itself, a general support claim.
 ### Runtime and stage execution
 
 - [Disaggregated Inference](feature/disaggregated_inference.md)
+- [Host Weight Runtime](feature/host_weight_runtime.md)
 - [Async Chunk](feature/async_chunk.md)
 - [Async Diffusion Output](feature/async_diffusion_output.md)
 - [Async Omni Output Materialization](feature/omni_async_output_materialization.md)

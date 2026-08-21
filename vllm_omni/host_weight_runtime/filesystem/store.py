@@ -20,7 +20,7 @@ from typing import Protocol
 
 import regex as re
 import torch
-from safetensors import safe_open
+from safetensors import SafetensorError, safe_open
 
 from ..config import CapacityPolicy, IntegrityPolicy, StorageClass, StorageDomainPolicy, ValidationLevel
 from ..errors import FailureCode, HostWeightError, HostWeightFailure, ResolutionStage
@@ -45,6 +45,51 @@ _READY_FILE = "READY.json"
 _MAX_METADATA_BYTES = 64 * 1024**2
 _FILE_HASH_CHUNK_BYTES = 8 * 1024**2
 _ARTIFACT_KEY_RE = re.compile(r"[0-9a-f]{64}")
+_LOCAL_DISK_FILESYSTEM_TYPES = frozenset(
+    {
+        "aufs",
+        "bcachefs",
+        "btrfs",
+        "erofs",
+        "ext2",
+        "ext3",
+        "ext4",
+        "f2fs",
+        "fuseblk",
+        "jfs",
+        "ntfs3",
+        "overlay",
+        "reiserfs",
+        "rootfs",
+        "xfs",
+        "zfs",
+    }
+)
+_REMOTE_FILESYSTEM_TYPES = frozenset(
+    {
+        "9p",
+        "afs",
+        "beegfs",
+        "ceph",
+        "cifs",
+        "fuse.gcsfuse",
+        "fuse.s3fs",
+        "fuse.sshfs",
+        "gcsfuse",
+        "glusterfs",
+        "gpfs",
+        "lustre",
+        "nfs",
+        "nfs4",
+        "orangefs",
+        "panfs",
+        "s3fs",
+        "smb3",
+        "sshfs",
+        "virtiofs",
+        "wekafs",
+    }
+)
 
 
 class _ExitContext(Protocol):
@@ -171,12 +216,12 @@ def _mount_unescape(value: str) -> str:
     return value.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
 
 
-def detect_storage_class(path: Path) -> StorageClass:
-    """Classify the mount containing path without spawning platform tools."""
+def detect_filesystem_type(path: Path) -> str:
+    """Return the kernel filesystem type for the most specific mount."""
     resolved = path.resolve()
     mountinfo = Path("/proc/self/mountinfo")
     if not mountinfo.is_file():  # pragma: no cover - vLLM-Omni production is Linux
-        return StorageClass.DISK
+        raise ValueError("cannot verify filesystem locality without /proc/self/mountinfo")
     best_length = -1
     best_type = ""
     for line in mountinfo.read_text(encoding="utf-8").splitlines():
@@ -195,7 +240,24 @@ def detect_storage_class(path: Path) -> StorageClass:
         if len(str(mount_point)) > best_length:
             best_length = len(str(mount_point))
             best_type = right_fields[0]
-    return StorageClass.TMPFS if best_type in {"tmpfs", "ramfs"} else StorageClass.DISK
+    if not best_type:
+        raise ValueError(f"cannot identify the filesystem containing {resolved}")
+    return best_type
+
+
+def _storage_class_for_filesystem_type(filesystem_type: str) -> StorageClass:
+    if filesystem_type in {"tmpfs", "ramfs"}:
+        return StorageClass.TMPFS
+    if filesystem_type in _LOCAL_DISK_FILESYSTEM_TYPES:
+        return StorageClass.DISK
+    if filesystem_type in _REMOTE_FILESYSTEM_TYPES:
+        raise ValueError(f"filesystem type {filesystem_type!r} is not node-local")
+    raise ValueError(f"filesystem type {filesystem_type!r} is not recognized as a local filesystem")
+
+
+def detect_storage_class(path: Path) -> StorageClass:
+    """Classify a verified node-local mount without spawning platform tools."""
+    return _storage_class_for_filesystem_type(detect_filesystem_type(path))
 
 
 class FilesystemHostWeightStore:
@@ -264,6 +326,27 @@ class FilesystemHostWeightStore:
 
     def _initialize_domain(self) -> None:
         try:
+            self.filesystem_type = detect_filesystem_type(self.root)
+            detected_storage_class = _storage_class_for_filesystem_type(self.filesystem_type)
+        except ValueError as exc:
+            raise HostWeightError(
+                _failure(
+                    ResolutionStage.CONFIGURATION,
+                    FailureCode.DOMAIN_POLICY_MISMATCH,
+                    f"local filesystem storage is unavailable for {self.root}: {exc}",
+                )
+            ) from exc
+        if detected_storage_class is not self.domain_policy.storage_class:
+            raise HostWeightError(
+                _failure(
+                    ResolutionStage.DOMAIN,
+                    FailureCode.STORAGE_CLASS_MISMATCH,
+                    "configured storage class "
+                    f"{self.domain_policy.storage_class.value} differs from detected {detected_storage_class.value}",
+                )
+            )
+
+        try:
             self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.locks_dir.mkdir(exist_ok=True, mode=0o700)
             for directory in (self.artifacts_dir, self.tmp_dir, self.quarantine_dir, self.deny_dir):
@@ -301,17 +384,6 @@ class FilesystemHostWeightStore:
                         )
                     )
 
-        detected = detect_storage_class(self.root)
-        if detected is not self.domain_policy.storage_class:
-            raise HostWeightError(
-                _failure(
-                    ResolutionStage.DOMAIN,
-                    FailureCode.STORAGE_CLASS_MISMATCH,
-                    "configured storage class "
-                    f"{self.domain_policy.storage_class.value} differs from detected {detected.value}",
-                )
-            )
-
         with FileLock(self.locks_dir / "domain-init.lock", exclusive=True, deadline=None):
             domain_path = self.root / _DOMAIN_FILE
             if domain_path.exists():
@@ -322,6 +394,7 @@ class FilesystemHostWeightStore:
                     "domain_id": self.domain_policy.domain_id,
                     "backend": "local_filesystem",
                     "storage_class": self.domain_policy.storage_class.value,
+                    "filesystem_type": self.filesystem_type,
                 }
                 if set(domain_metadata) != {*expected, "domain_uuid"}:
                     raise HostWeightError(
@@ -349,6 +422,7 @@ class FilesystemHostWeightStore:
                     "domain_id": self.domain_policy.domain_id,
                     "backend": "local_filesystem",
                     "storage_class": self.domain_policy.storage_class.value,
+                    "filesystem_type": self.filesystem_type,
                 }
                 _write_atomic_json(domain_path, domain_metadata)
             self.domain_uuid = str(domain_metadata["domain_uuid"])
@@ -473,6 +547,16 @@ class FilesystemHostWeightStore:
             )
         try:
             lease = self._open_lease(identity, entry_path, artifact_lock, validation)
+            if self._deny_path(identity.key).exists():
+                lease.close()
+                return StoreResult(
+                    StoreStatus.INVALID,
+                    failure=_failure(
+                        ResolutionStage.LOOKUP,
+                        FailureCode.ARTIFACT_DENIED,
+                        f"artifact {identity.key} was denied during lookup",
+                    ),
+                )
             return StoreResult(StoreStatus.HIT, lease=lease)
         except HostWeightError as exc:
             try:
@@ -482,7 +566,7 @@ class FilesystemHostWeightStore:
             finally:
                 artifact_lock.close()
             return StoreResult(StoreStatus.INVALID, failure=exc.failure)
-        except (OSError, ValueError, ManifestValidationError) as exc:
+        except (OSError, SafetensorError, ValueError, ManifestValidationError) as exc:
             failure = _failure(
                 ResolutionStage.VALIDATION,
                 FailureCode.MANIFEST_CORRUPT,
@@ -554,6 +638,17 @@ class FilesystemHostWeightStore:
                         ResolutionStage.VALIDATION,
                         FailureCode.MANIFEST_INCOMPATIBLE,
                         "artifact semantic identity differs from the exact request",
+                    )
+                )
+            if (
+                manifest.producer_schema != identity.producer.manifest_schema
+                or manifest.restorer_schema != identity.producer.restorer_schema
+            ):
+                raise HostWeightError(
+                    _failure(
+                        ResolutionStage.VALIDATION,
+                        FailureCode.MANIFEST_INCOMPATIBLE,
+                        "artifact producer or restorer schema differs from the exact request",
                     )
                 )
 
@@ -790,7 +885,12 @@ class FilesystemHostWeightStore:
                     stage = ResolutionStage.PRODUCTION
                 return StoreResult(
                     StoreStatus.FAILED,
-                    failure=_failure(stage, code, f"artifact production failed: {exc}"),
+                    failure=_failure(
+                        stage,
+                        code,
+                        f"artifact production failed: {exc}",
+                        retryable=stage is ResolutionStage.CAPACITY,
+                    ),
                 )
             except Exception as exc:
                 if writer is not None:
@@ -806,7 +906,6 @@ class FilesystemHostWeightStore:
                 )
 
             assert manifest is not None
-            timed_out = time.monotonic() > deadline
             try:
                 with FileLock(self._artifact_lock_path(identity.key), exclusive=True, deadline=None):
                     entry_path = self._entry_path(identity.key)
@@ -849,16 +948,6 @@ class FilesystemHostWeightStore:
                     ),
                 )
 
-            if timed_out:
-                return StoreResult(
-                    StoreStatus.TIMEOUT,
-                    failure=_failure(
-                        ResolutionStage.PRODUCTION,
-                        FailureCode.PRODUCTION_TIMEOUT,
-                        "artifact was published after the resolution deadline",
-                        retryable=True,
-                    ),
-                )
             opened = self.lookup(identity, validation=validation, deadline=deadline)
             if opened.status is not StoreStatus.HIT:
                 return opened
@@ -872,6 +961,7 @@ class FilesystemHostWeightStore:
                     ResolutionStage.CAPACITY,
                     FailureCode.ARTIFACT_TOO_LARGE,
                     f"projected artifact size {projected_artifact_bytes} exceeds {policy.max_artifact_bytes}",
+                    retryable=True,
                 )
             )
         store_bytes = self._tree_bytes(self.root)
@@ -881,6 +971,7 @@ class FilesystemHostWeightStore:
                     ResolutionStage.CAPACITY,
                     FailureCode.STORE_LIMIT_EXCEEDED,
                     f"store size plus allocation would exceed {policy.max_store_bytes}",
+                    retryable=True,
                 )
             )
         free_bytes = shutil.disk_usage(self.root).free
@@ -890,6 +981,7 @@ class FilesystemHostWeightStore:
                     ResolutionStage.CAPACITY,
                     FailureCode.INSUFFICIENT_CAPACITY,
                     f"allocation would leave less than {policy.min_free_bytes} free bytes",
+                    retryable=True,
                 )
             )
 
@@ -1050,6 +1142,7 @@ class FilesystemHostWeightStore:
             scope=self.domain_policy.scope.value,
             domain_id=self.domain_policy.domain_id,
             storage_class=self.domain_policy.storage_class.value,
+            filesystem_type=self.filesystem_type,
             policy_version=self.policy_version,
             store_bytes=self._tree_bytes(self.root),
             filesystem_free_bytes=usage.free,

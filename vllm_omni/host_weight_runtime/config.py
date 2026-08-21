@@ -117,21 +117,23 @@ class ProductionPolicy:
     def __post_init__(self) -> None:
         if not isinstance(self.allow_local_build, bool) or not isinstance(self.allow_post_load_publish, bool):
             raise ValueError("production switches must be booleans")
+        if self.allow_post_load_publish:
+            raise ValueError("post-load publication is not implemented")
 
 
 @dataclass(frozen=True)
 class WaitPolicy:
-    resolution_timeout_seconds: float = 600.0
+    coordination_timeout_seconds: float = 600.0
 
     def __post_init__(self) -> None:
-        timeout = self.resolution_timeout_seconds
+        timeout = self.coordination_timeout_seconds
         if (
             isinstance(timeout, bool)
             or not isinstance(timeout, int | float)
             or not math.isfinite(timeout)
             or timeout <= 0
         ):
-            raise ValueError("resolution_timeout_seconds must be positive")
+            raise ValueError("coordination_timeout_seconds must be positive")
 
 
 @dataclass(frozen=True)

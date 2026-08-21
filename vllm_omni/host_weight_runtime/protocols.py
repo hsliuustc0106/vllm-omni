@@ -137,10 +137,14 @@ class ProductionMetadata:
 
 
 class WeightProducer(Protocol):
+    """Synchronous V1 producer; callers do not preempt an active build."""
+
     @property
     def spec(self) -> WeightProductionSpec: ...
 
-    def produce(self, writer: ArtifactWriter) -> ProductionMetadata: ...
+    def produce(self, writer: ArtifactWriter) -> ProductionMetadata:
+        """Produce one exact artifact synchronously or raise."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -149,17 +153,27 @@ class BuildRequest:
 
 
 class WeightRestorePlan(Protocol):
-    def commit(self) -> object: ...
+    """A validated, one-shot model mutation plan."""
+
+    def commit(self) -> None:
+        """Mutate the target model exactly once or raise."""
+        ...
 
 
 class WeightRestorer(Protocol):
+    """Validate a lease-to-model restore without mutating either input."""
+
     @property
     def schema(self) -> str: ...
 
-    def plan_restore(self, model: object, lease: HostWeightLease) -> WeightRestorePlan: ...
+    def plan_restore(self, model: object, lease: HostWeightLease) -> WeightRestorePlan:
+        """Return a validated plan; all model mutation is deferred to commit()."""
+        ...
 
 
 class HostWeightStore(Protocol):
+    """Exact artifact access whose deadlines bound lock acquisition only."""
+
     def lookup(
         self,
         identity: WeightArtifactIdentity,

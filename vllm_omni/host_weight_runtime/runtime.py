@@ -92,26 +92,21 @@ class HostWeightRuntime:
             raise ValueError("enabled Host Weight Runtime requires an exact artifact identity")
         if self._initialization_failure is not None:
             failure = self._initialization_failure
-            may_fallback = self.config.mode is RuntimeMode.PREFERRED and failure.retryable
-            action = ResolutionAction.CANONICAL_FALLBACK if may_fallback else ResolutionAction.FAIL_STARTUP
-            return self._finish(
-                ResolutionReport(
-                    resolution_id=uuid.uuid4().hex,
-                    outcome=(ResolutionOutcome.CANONICAL_FALLBACK if may_fallback else ResolutionOutcome.FAILED),
-                    attempts=(
-                        ResolutionAttempt(
-                            stage=failure.stage,
-                            result=AttemptResult.ERROR,
-                            action=action,
-                            elapsed_seconds=time.monotonic() - started,
-                            failure=failure,
-                        ),
+            action = self._action_for_failure(failure)
+            return self._finish_terminal(
+                (
+                    ResolutionAttempt(
+                        stage=failure.stage,
+                        result=AttemptResult.ERROR,
+                        action=action,
+                        elapsed_seconds=time.monotonic() - started,
+                        failure=failure,
                     ),
-                    elapsed_seconds=time.monotonic() - started,
-                )
+                ),
+                started,
             )
         assert self.store is not None
-        deadline = started + self.config.wait.resolution_timeout_seconds
+        deadline = started + self.config.wait.coordination_timeout_seconds
         attempts: list[ResolutionAttempt] = []
 
         lookup_started = time.monotonic()
@@ -149,7 +144,9 @@ class HostWeightRuntime:
                 action=local_action,
             )
         )
-        remote_required = self.config.remote.on_local_miss is RemoteOnMiss.REQUIRE
+        if local.status in {StoreStatus.TIMEOUT, StoreStatus.FAILED}:
+            return self._finish_terminal(tuple(attempts), started)
+
         producer_allowed = self._producer_allowed(producer)
         if self.config.remote.on_local_miss is not RemoteOnMiss.DISABLED:
             remote_failure = HostWeightFailure(
@@ -163,17 +160,14 @@ class HostWeightRuntime:
                 ResolutionAttempt(
                     stage=ResolutionStage.REMOTE,
                     result=AttemptResult.SKIPPED,
-                    action=(
-                        self._fallback_action()
-                        if remote_required or not producer_allowed
-                        else ResolutionAction.TRY_PRODUCER
-                    ),
+                    action=self._action_for_failure(remote_failure),
                     elapsed_seconds=0.0,
                     failure=remote_failure,
                 )
             )
+            return self._finish_terminal(tuple(attempts), started)
 
-        if not remote_required and producer_allowed:
+        if producer_allowed:
             assert producer is not None
             production_started = time.monotonic()
             produced = self.store.get_or_build(
@@ -206,14 +200,14 @@ class HostWeightRuntime:
                     ResolutionStage.PRODUCTION,
                     produced,
                     time.monotonic() - production_started,
-                    action=self._fallback_action(),
+                    action=self._terminal_action_for_store_result(produced),
                 )
             )
-        elif not remote_required:
+        else:
             unavailable = HostWeightFailure(
                 stage=ResolutionStage.PRODUCTION,
                 code=FailureCode.PRODUCER_UNAVAILABLE,
-                retryable=False,
+                retryable=True,
                 message="no allowed producer can build the exact requested representation",
                 details=CanonicalJson.empty(),
             )
@@ -221,43 +215,45 @@ class HostWeightRuntime:
                 ResolutionAttempt(
                     stage=ResolutionStage.PRODUCTION,
                     result=AttemptResult.SKIPPED,
-                    action=self._fallback_action(),
+                    action=self._action_for_failure(unavailable),
                     elapsed_seconds=0.0,
                     failure=unavailable,
                 )
             )
 
-        outcome = (
-            ResolutionOutcome.CANONICAL_FALLBACK
-            if self.config.mode is RuntimeMode.PREFERRED
-            else ResolutionOutcome.FAILED
-        )
-        return self._finish(
-            ResolutionReport(
-                resolution_id=uuid.uuid4().hex,
-                outcome=outcome,
-                attempts=tuple(attempts),
-                elapsed_seconds=time.monotonic() - started,
-            )
-        )
+        return self._finish_terminal(tuple(attempts), started)
 
-    def _fallback_action(self) -> ResolutionAction:
+    def _mode_terminal_action(self) -> ResolutionAction:
         if self.config.mode is RuntimeMode.PREFERRED:
             return ResolutionAction.CANONICAL_FALLBACK
         return ResolutionAction.FAIL_STARTUP
+
+    def _action_for_failure(self, failure: HostWeightFailure | None) -> ResolutionAction:
+        if failure is None:
+            raise ValueError("failed store results require a typed failure")
+        if self.config.mode is RuntimeMode.PREFERRED and failure.retryable:
+            return ResolutionAction.CANONICAL_FALLBACK
+        return ResolutionAction.FAIL_STARTUP
+
+    def _terminal_action_for_store_result(self, result: StoreResult) -> ResolutionAction:
+        if result.status in {StoreStatus.MISS, StoreStatus.INVALID}:
+            return self._mode_terminal_action()
+        return self._action_for_failure(result.failure)
 
     def _next_after_local(
         self,
         result: StoreResult,
         producer: WeightProducer | None,
     ) -> ResolutionAction:
+        if result.status in {StoreStatus.TIMEOUT, StoreStatus.FAILED}:
+            return self._terminal_action_for_store_result(result)
         if self.config.remote.on_local_miss is not RemoteOnMiss.DISABLED:
             return ResolutionAction.TRY_REMOTE
         if self._producer_allowed(producer):
             if result.status is StoreStatus.INVALID:
                 return ResolutionAction.QUARANTINE_THEN_PRODUCE
             return ResolutionAction.TRY_PRODUCER
-        return self._fallback_action()
+        return self._mode_terminal_action()
 
     def _producer_allowed(self, producer: WeightProducer | None) -> bool:
         return (
@@ -293,6 +289,27 @@ class HostWeightRuntime:
             action=action,
             elapsed_seconds=elapsed,
             failure=result.failure,
+        )
+
+    def _finish_terminal(
+        self,
+        attempts: tuple[ResolutionAttempt, ...],
+        started: float,
+    ) -> HostWeightResolution:
+        action = attempts[-1].action
+        if action is ResolutionAction.CANONICAL_FALLBACK:
+            outcome = ResolutionOutcome.CANONICAL_FALLBACK
+        elif action is ResolutionAction.FAIL_STARTUP:
+            outcome = ResolutionOutcome.FAILED
+        else:
+            raise ValueError(f"resolution cannot terminate with action {action.value}")
+        return self._finish(
+            ResolutionReport(
+                resolution_id=uuid.uuid4().hex,
+                outcome=outcome,
+                attempts=attempts,
+                elapsed_seconds=time.monotonic() - started,
+            )
         )
 
     def _finish(

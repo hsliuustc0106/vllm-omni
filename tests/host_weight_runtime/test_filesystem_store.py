@@ -6,11 +6,14 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
+import json
 import multiprocessing as mp
 import os
 import shutil
 import threading
 import time
+import warnings
 from collections.abc import Sequence
 from dataclasses import replace
 from multiprocessing.process import BaseProcess
@@ -19,7 +22,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from vllm_omni.model_executor.host_weight_runtime import (
+from vllm_omni.host_weight_runtime import (
     AdaptationIdentity,
     ArtifactInventoryState,
     BuildRequest,
@@ -28,12 +31,14 @@ from vllm_omni.model_executor.host_weight_runtime import (
     CoordinationScope,
     FailureCode,
     HostWeightError,
+    HostWeightLease,
     IntegrityPolicy,
     ProducerIdentity,
     ProductionMetadata,
     ProductionSourceMode,
     ResolutionStage,
     RuntimeWeightLayout,
+    StorageClass,
     StorageDomainPolicy,
     StorageScope,
     StoreResult,
@@ -46,10 +51,13 @@ from vllm_omni.model_executor.host_weight_runtime import (
     WeightRepresentation,
     WeightSourceIdentity,
 )
-from vllm_omni.model_executor.host_weight_runtime.filesystem import (
+from vllm_omni.host_weight_runtime.filesystem import (
     FilesystemHostWeightStore,
+    detect_filesystem_type,
     detect_storage_class,
 )
+from vllm_omni.host_weight_runtime.filesystem import store as filesystem_store_module
+from vllm_omni.host_weight_runtime.filesystem.locks import FileLock
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -210,6 +218,37 @@ class InitialLookupBarrierStore(FilesystemHostWeightStore):
         return result
 
 
+class PausingOpenLeaseStore(FilesystemHostWeightStore):
+    """Pause after opening a lease so another lookup can publish a deny marker."""
+
+    def __init__(
+        self,
+        domain: StorageDomainPolicy,
+        capacity: CapacityPolicy,
+        integrity: IntegrityPolicy,
+        *,
+        lease_opened: threading.Event,
+        resume_lookup: threading.Event,
+    ) -> None:
+        super().__init__(domain, capacity, integrity)
+        self._lease_opened = lease_opened
+        self._resume_lookup = resume_lookup
+
+    def _open_lease(
+        self,
+        identity: WeightArtifactIdentity,
+        entry_path: Path,
+        artifact_lock: FileLock,
+        validation: ValidationLevel,
+    ) -> HostWeightLease:
+        lease = super()._open_lease(identity, entry_path, artifact_lock, validation)
+        self._lease_opened.set()
+        if not self._resume_lookup.wait(5):
+            lease.close()
+            raise TimeoutError("test did not resume paused lookup")
+        return lease
+
+
 def _make_store(
     root: Path,
     *,
@@ -332,6 +371,7 @@ def test_build_lookup_share_one_published_backing_and_lease_blocks_cleanup(tmp_p
     assert artifact.artifact_lock_active
     domain = store.inspect_domain()
     assert domain.domain_uuid == built.lease.provenance.domain_uuid
+    assert domain.filesystem_type == detect_filesystem_type(store.root)
     assert any(
         item.artifact_key == identity.key and item.state is ArtifactInventoryState.READY and item.size_bytes > 0
         for item in domain.inventory
@@ -397,6 +437,36 @@ def test_concurrent_lease_close_waits_for_resource_teardown(tmp_path: Path) -> N
     assert not first.is_alive() and not second.is_alive()
     assert second_returned.is_set()
     assert not errors
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork-specific flock ownership regression")
+def test_forked_child_close_does_not_release_parent_lease_lock(tmp_path: Path) -> None:
+    identity = _identity()
+    store = _make_store(tmp_path / "store")
+    built = store.get_or_build(
+        BuildRequest(identity),
+        FakeProducer(identity),
+        validation=ValidationLevel.FULL_CHECKSUM,
+        deadline=time.monotonic() + 10,
+    )
+    assert built.lease is not None
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        child_pid = os.fork()
+    if child_pid == 0:  # pragma: no cover - assertions run in the parent
+        try:
+            built.lease.close()
+        except BaseException:
+            os._exit(1)
+        os._exit(0)
+    _, child_status = os.waitpid(child_pid, 0)
+    assert os.waitstatus_to_exitcode(child_status) == 0
+
+    active = store.cleanup(identity)
+    assert active is not None and active.code is FailureCode.ACTIVE_LEASE
+    built.lease.close()
+    assert store.cleanup(identity) is None
 
 
 @pytest.mark.parametrize("write_mode", ["incomplete", "overlap"])
@@ -472,6 +542,65 @@ def test_lookup_treats_orphan_deny_marker_as_miss(tmp_path: Path) -> None:
     assert result.status is StoreStatus.MISS
 
 
+def test_overlapping_weaker_lookup_cannot_return_after_artifact_is_denied(tmp_path: Path) -> None:
+    identity = _identity()
+    root = tmp_path / "store"
+    store = _make_store(root)
+    built = store.get_or_build(
+        BuildRequest(identity),
+        FakeProducer(identity),
+        validation=ValidationLevel.FULL_CHECKSUM,
+        deadline=time.monotonic() + 10,
+    )
+    assert built.lease is not None
+    built.lease.close()
+
+    artifact_dir = store.artifacts_dir / identity.key
+    payload = artifact_dir / "weights.safetensors"
+    os.chmod(artifact_dir, 0o755)
+    os.chmod(payload, 0o644)
+    with payload.open("r+b") as handle:
+        handle.seek(-1, os.SEEK_END)
+        original = handle.read(1)
+        handle.seek(-1, os.SEEK_END)
+        handle.write(bytes([original[0] ^ 0xFF]))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(payload, 0o444)
+    os.chmod(artifact_dir, 0o555)
+
+    lease_opened = threading.Event()
+    resume_lookup = threading.Event()
+    overlapping = PausingOpenLeaseStore(
+        StorageDomainPolicy(root=root, storage_class=detect_storage_class(root)),
+        CapacityPolicy(),
+        IntegrityPolicy(),
+        lease_opened=lease_opened,
+        resume_lookup=resume_lookup,
+    )
+    weak_results: list[StoreResult] = []
+
+    def weak_lookup() -> None:
+        weak_results.append(overlapping.lookup(identity, validation=ValidationLevel.MANIFEST_AND_METADATA))
+
+    thread = threading.Thread(target=weak_lookup)
+    thread.start()
+    try:
+        assert lease_opened.wait(5)
+        strong = store.lookup(identity, validation=ValidationLevel.FULL_CHECKSUM)
+        assert strong.status is StoreStatus.INVALID
+        assert (store.deny_dir / f"{identity.key}.json").is_file()
+    finally:
+        resume_lookup.set()
+        thread.join(5)
+
+    assert not thread.is_alive()
+    assert len(weak_results) == 1
+    weak = weak_results[0]
+    assert weak.status is StoreStatus.INVALID
+    assert weak.failure is not None and weak.failure.code is FailureCode.ARTIFACT_DENIED
+
+
 def test_full_checksum_denies_quarantines_and_rebuilds_corrupt_payload(tmp_path: Path) -> None:
     identity = _identity()
     store = _make_store(tmp_path / "store")
@@ -525,6 +654,86 @@ def test_full_checksum_denies_quarantines_and_rebuilds_corrupt_payload(tmp_path:
     rebuilt.lease.close()
     assert not (store.deny_dir / f"{identity.key}.json").exists()
     assert len(list(store.quarantine_dir.iterdir())) == 1
+
+
+def test_malformed_safetensors_is_a_typed_invalid_artifact(tmp_path: Path) -> None:
+    identity = _identity()
+    store = _make_store(tmp_path / "store")
+    built = store.get_or_build(
+        BuildRequest(identity),
+        FakeProducer(identity),
+        validation=ValidationLevel.FULL_CHECKSUM,
+        deadline=time.monotonic() + 10,
+    )
+    assert built.lease is not None
+    built.lease.close()
+
+    artifact_dir = store.artifacts_dir / identity.key
+    payload = artifact_dir / "weights.safetensors"
+    os.chmod(artifact_dir, 0o755)
+    os.chmod(payload, 0o644)
+    with payload.open("r+b") as handle:
+        handle.write(b"\xff" * 8)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(payload, 0o444)
+    os.chmod(artifact_dir, 0o555)
+
+    result = store.lookup(identity, validation=ValidationLevel.MANIFEST_AND_METADATA)
+
+    assert result.status is StoreStatus.INVALID
+    assert result.failure is not None and result.failure.code is FailureCode.MANIFEST_CORRUPT
+    assert (store.deny_dir / f"{identity.key}.json").is_file()
+
+
+@pytest.mark.parametrize("schema_field", ["producer_schema", "restorer_schema"])
+def test_lookup_rejects_manifest_schema_that_differs_from_identity(
+    tmp_path: Path,
+    schema_field: str,
+) -> None:
+    identity = _identity()
+    store = _make_store(tmp_path / "store")
+    built = store.get_or_build(
+        BuildRequest(identity),
+        FakeProducer(identity),
+        validation=ValidationLevel.FULL_CHECKSUM,
+        deadline=time.monotonic() + 10,
+    )
+    assert built.lease is not None
+    built.lease.close()
+
+    artifact_dir = store.artifacts_dir / identity.key
+    manifest_path = artifact_dir / "manifest.json"
+    marker_path = artifact_dir / "READY.json"
+    manifest_document = json.loads(manifest_path.read_bytes())
+    marker_document = json.loads(marker_path.read_bytes())
+    manifest_document[schema_field] = "incompatible-schema"
+    manifest_bytes = json.dumps(
+        manifest_document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    marker_document["manifest_sha256"] = hashlib.sha256(manifest_bytes).hexdigest()
+    marker_bytes = json.dumps(
+        marker_document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    os.chmod(artifact_dir, 0o755)
+    for path, contents in ((manifest_path, manifest_bytes), (marker_path, marker_bytes)):
+        os.chmod(path, 0o644)
+        path.write_bytes(contents)
+        os.chmod(path, 0o444)
+    os.chmod(artifact_dir, 0o555)
+
+    result = store.lookup(identity, validation=ValidationLevel.MANIFEST_AND_METADATA)
+
+    assert result.status is StoreStatus.INVALID
+    assert result.failure is not None and result.failure.code is FailureCode.MANIFEST_INCOMPATIBLE
+    assert (store.deny_dir / f"{identity.key}.json").is_file()
 
 
 def test_noncooperative_conflicting_publication_is_reported_without_replacement(tmp_path: Path) -> None:
@@ -599,6 +808,24 @@ def test_payload_symlink_is_rejected_without_following_it(tmp_path: Path) -> Non
     result = store.lookup(identity, validation=ValidationLevel.MANIFEST_AND_METADATA)
     assert result.status is StoreStatus.INVALID
     assert result.failure is not None and result.failure.code is FailureCode.MANIFEST_CORRUPT
+
+
+def test_coordination_deadline_does_not_claim_to_cancel_an_active_producer(tmp_path: Path) -> None:
+    identity = _identity()
+    store = _make_store(tmp_path / "store")
+    started = time.monotonic()
+
+    result = store.get_or_build(
+        BuildRequest(identity),
+        FakeProducer(identity, delay_seconds=0.15),
+        validation=ValidationLevel.FULL_CHECKSUM,
+        deadline=time.monotonic() + 0.02,
+    )
+
+    assert time.monotonic() - started >= 0.1
+    assert result.status is StoreStatus.BUILT
+    assert result.lease is not None
+    result.lease.close()
 
 
 @pytest.mark.parallel
@@ -800,6 +1027,28 @@ def test_domain_capacity_policy_is_authoritative(tmp_path: Path) -> None:
 
     with pytest.raises(HostWeightError, match="capacity policy differs"):
         _make_store(root, capacity=CapacityPolicy(max_store_bytes=8192))
+
+
+@pytest.mark.parametrize("filesystem_type", ["nfs4", "cifs", "lustre", "ceph", "unknownfs"])
+def test_remote_and_unknown_filesystems_cannot_back_the_local_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filesystem_type: str,
+) -> None:
+    monkeypatch.setattr(filesystem_store_module, "detect_filesystem_type", lambda _path: filesystem_type)
+    root = tmp_path / "store"
+
+    with pytest.raises(ValueError, match="not node-local|not recognized"):
+        detect_storage_class(root)
+    with pytest.raises(HostWeightError) as error:
+        FilesystemHostWeightStore(
+            StorageDomainPolicy(root=root, storage_class=StorageClass.DISK),
+            CapacityPolicy(),
+            IntegrityPolicy(),
+        )
+
+    assert error.value.failure.code is FailureCode.DOMAIN_POLICY_MISMATCH
+    assert not root.exists()
 
 
 def test_trusted_store_rejects_group_or_world_writable_root(tmp_path: Path) -> None:
