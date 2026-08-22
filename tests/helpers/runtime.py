@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 """Server/client/runner runtime primitives for tests."""
 
 import asyncio
@@ -176,6 +179,17 @@ def get_open_port(host: str = "127.0.0.1", *, max_attempts: int = 128) -> int:
     raise RuntimeError(
         f"Could not obtain a free TCP port on {host!r} after {max_attempts} attempts (last error: {last_exc!r})"
     ) from last_exc
+
+
+def get_distributed_init_method() -> str:
+    """Return a fresh ``file://`` init_method for ``torch.distributed`` process groups.
+
+    Rendezvous happens through a filesystem path instead of a pre-agreed TCP port,
+    so there's no bind-time race to retry around: the path is unique per call and
+    the real rank-0 process is the only one that ever creates it.
+    """
+    with tempfile.NamedTemporaryFile(prefix="torch_dist_init_") as f:
+        return f"file://{f.name}"
 
 
 def dummy_messages_from_mix_data(
