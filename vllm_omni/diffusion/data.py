@@ -700,8 +700,10 @@ class OmniDiffusionConfig:
     # in both directions. See docs/features/session_state_manager.md.
     enable_session_state_manager: bool = False
 
-    # Distributed executor backend
-    distributed_executor_backend: str = "mp"
+    # Distributed executor backend. ``None`` means auto: ``"uni"`` at
+    # ``num_gpus == 1``, ``"mp"`` otherwise. Explicit ``"mp"`` keeps a
+    # worker subprocess (process isolation and RPC timeouts).
+    distributed_executor_backend: str | None = None
     nccl_port: int | None = None
 
     # Engine backend selection, resolved by ``DiffusionEngine.resolve_engine_class``

@@ -663,7 +663,7 @@ class _DiffusionConfigProjection:
     dtype: Any = "auto"
     trust_remote_code: bool = False
     revision: str | None = None
-    distributed_executor_backend: str = "mp"
+    distributed_executor_backend: str | None = None
     dist_timeout: int | None = None
     nccl_port: int | None = None
     master_port: int | None = None

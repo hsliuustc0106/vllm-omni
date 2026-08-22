@@ -24,10 +24,15 @@ class DiffusionExecutor(ABC):
     def get_class(od_config: OmniDiffusionConfig) -> type[DiffusionExecutor]:
         executor_class: type[DiffusionExecutor]
         distributed_executor_backend = od_config.distributed_executor_backend
-        # Keep backward-compatible behavior for callers/configs that omit this
-        # field and rely on the historical diffusion default backend.
+        # Mirror vLLM's `world_size == 1 -> "uni"` default
+        # (vllm/config/parallel.py). A single-GPU diffusion deployment has
+        # nothing to distribute: spawning a worker only adds MessageQueues,
+        # /dev/shm output segments, and a second model load. Explicit "mp"
+        # keeps process isolation and RPC timeouts. Multi-GPU still defaults
+        # to "mp".
         if distributed_executor_backend is None:
-            distributed_executor_backend = "mp"
+            num_gpus = od_config.num_gpus or 1
+            distributed_executor_backend = "uni" if num_gpus == 1 else "mp"
 
         if isinstance(distributed_executor_backend, type):
             if not issubclass(distributed_executor_backend, DiffusionExecutor):
@@ -42,6 +47,10 @@ class DiffusionExecutor(ABC):
             from vllm_omni.diffusion.executor.multiproc_executor import MultiprocDiffusionExecutor
 
             executor_class = MultiprocDiffusionExecutor
+        elif distributed_executor_backend == "uni":
+            from vllm_omni.diffusion.executor.uniproc_executor import UniProcDiffusionExecutor
+
+            executor_class = UniProcDiffusionExecutor
         elif distributed_executor_backend == "external_launcher":
             raise NotImplementedError("external_launcher backend is not yet supported.")
         elif isinstance(distributed_executor_backend, str):
