@@ -142,13 +142,24 @@ class DiffusionExecutor(ABC):
             raise TypeError("determine_available_kv_memory must return list[int]")
         return result
 
-    def set_kv_cache_configs(self, kv_cache_configs: list[KVCacheConfig]) -> None:
-        """Send each native rank-local config back to all Workers."""
+    def set_kv_cache_configs(self, kv_cache_configs: list[KVCacheConfig], resolved_max_model_len: int) -> None:
+        """Send rank-local configs and the resolved model length to all Workers."""
 
         # The default control-plane RPC mode executes on every rank and has
         # rank 0 return the gathered rank statuses, so failures on nonzero
         # ranks are not silently dropped.
-        self.collective_rpc("set_kv_cache_configs", args=(kv_cache_configs,))
+        self.collective_rpc("set_kv_cache_configs", args=(kv_cache_configs, resolved_max_model_len))
+
+    def remove_diffusion_kv_requests(self, request_ids: list[str]) -> None:
+        """Clear request rows on every Worker after Scheduler retirement."""
+
+        unique_request_ids = list(dict.fromkeys(request_ids))
+        if not unique_request_ids:
+            return
+        self.collective_rpc(
+            "remove_diffusion_kv_requests",
+            args=(unique_request_ids,),
+        )
 
     @abstractmethod
     def shutdown(self) -> None:

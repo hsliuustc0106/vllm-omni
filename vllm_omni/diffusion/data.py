@@ -714,6 +714,9 @@ class OmniDiffusionConfig:
 
     # Local Diffusion KV ownership and cache-layout mode.
     diffusion_kv_mode: DiffusionKVCacheMode = DiffusionKVCacheMode.DENSE_LEGACY
+    # Maximum number of native BlockTable rows one public request can own
+    # (sequences plus independent contexts). The model adapter defines it.
+    diffusion_kv_max_rows_per_request: int | None = None
 
     # Optional override for the diffusion model runner class (import path).
     # Precedence in the worker: this override > the runner declared by the
@@ -990,6 +993,15 @@ class OmniDiffusionConfig:
         if not isinstance(self.diffusion_compile_dynamic, bool):
             raise TypeError(f"diffusion_compile_dynamic must be a bool, got {type(self.diffusion_compile_dynamic)!r}")
         self.diffusion_kv_mode = parse_diffusion_kv_cache_mode(self.diffusion_kv_mode)
+        if self.diffusion_kv_max_rows_per_request is not None and (
+            type(self.diffusion_kv_max_rows_per_request) is not int or self.diffusion_kv_max_rows_per_request <= 0
+        ):
+            raise ValueError("diffusion_kv_max_rows_per_request must be a positive integer when set")
+        if (
+            self.diffusion_kv_mode is DiffusionKVCacheMode.PAGED_SCHEDULER
+            and self.diffusion_kv_max_rows_per_request is None
+        ):
+            raise ValueError("paged_scheduler requires diffusion_kv_max_rows_per_request to be set")
         if self.kv_cache_memory_bytes is not None and self.kv_cache_memory_bytes < 0:
             raise ValueError("kv_cache_memory_bytes must be non-negative")
         if not 0.0 < self.gpu_memory_utilization <= 1.0:

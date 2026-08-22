@@ -29,7 +29,7 @@ from vllm_omni.diffusion.data import (
     DiffusionRequestAbortedError,
     OmniDiffusionConfig,
 )
-from vllm_omni.diffusion.diffusion_kv.config import DiffusionKVCacheMode
+from vllm_omni.diffusion.diffusion_kv.config import DiffusionKVCacheMode, is_scheduler_paged_kv_mode
 from vllm_omni.diffusion.diffusion_kv.initialization import initialize_diffusion_kv_control_plane
 from vllm_omni.diffusion.executor.abstract import DiffusionExecutor
 from vllm_omni.diffusion.io_support import (
@@ -634,12 +634,25 @@ class DiffusionEngine:
             if not task.future.done():
                 task.future.set_exception(exc)
 
+    def _remove_diffusion_kv_requests(self, request_ids: Iterable[str]) -> None:
+        """Clear terminal Worker rows while Scheduler owns the allocations."""
+
+        od_config = getattr(self, "od_config", None)
+        if od_config is None or not is_scheduler_paged_kv_mode(
+            getattr(od_config, "diffusion_kv_mode", DiffusionKVCacheMode.DENSE_LEGACY)
+        ):
+            return
+        unique_request_ids = list(dict.fromkeys(request_ids))
+        if unique_request_ids:
+            self.executor.remove_diffusion_kv_requests(unique_request_ids)
+
     def _emit_finished_outputs(
         self,
         finished_ids: set[str],
         runner_output: BaseRunnerOutput | None = None,
         missing_result_error: str = "Diffusion execution finished without a final output",
     ) -> None:
+        self._remove_diffusion_kv_requests(finished_ids)
         for rid in finished_ids:
             if runner_output is not None:
                 _output = runner_output.get_request_output(rid)
@@ -658,6 +671,8 @@ class DiffusionEngine:
         if self.execution_mode != DiffusionExecutionMode.STEP_BATCH:
             self._emit_finished_outputs(finished_ids, runner_output)
             return
+
+        self._remove_diffusion_kv_requests(finished_ids)
 
         delivered_finished_req_ids: set[str] = set()
 
@@ -852,6 +867,7 @@ class DiffusionEngine:
                 sched_output = self.scheduler.schedule()
                 if sched_output.is_empty:
                     if target_request_id in sched_output.finished_req_ids:
+                        self._remove_diffusion_kv_requests([target_request_id])
                         return self._finalize_finished_request(target_request_id)
                     if not self.scheduler.has_requests():
                         raise RuntimeError("Diffusion scheduler has no runnable requests.")
@@ -881,6 +897,7 @@ class DiffusionEngine:
                 if not isinstance(runner_output, RunnerOutput) and not len(runner_output) == 1:
                     raise ValueError("Sync func should receive one result at one time")
                 if target_request_id in finished_req_ids:
+                    self._remove_diffusion_kv_requests([target_request_id])
                     req_output = runner_output.get_request_output(target_request_id)
                     output = self._finalize_finished_request(
                         target_request_id,
@@ -1232,8 +1249,11 @@ class DiffusionEngine:
 
     def _abort_requests(self, request_ids: str | Iterable[str]) -> None:
         request_ids = [request_ids] if isinstance(request_ids, str) else list(request_ids)
+        request_ids = list(dict.fromkeys(request_ids))
 
-        for request_id in dict.fromkeys(request_ids):
+        self._remove_diffusion_kv_requests(request_ids)
+
+        for request_id in request_ids:
             if self.scheduler.get_request_state(request_id) is not None:
                 self.scheduler.finish_requests(request_id, DiffusionRequestStatus.FINISHED_ABORTED)
 
