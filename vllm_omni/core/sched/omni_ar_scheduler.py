@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
+import time
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 import numpy as np
@@ -107,6 +108,10 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
 
         # Cache per-request flag to avoid repeated deserialization of additional_information
         self._omits_kv_transfer_cache: dict[str, bool] = {}
+
+        # KV-wait start ts for the vllm_omni:kv_wait_s metric; see
+        # _emit_kv_wait_output for the engine-core → orchestrator carry.
+        self._kv_wait_start_ts: dict[str, float] = {}
         self._init_omni_io_scheduling_state()
         # Snapshot prompt length for each streaming input update
         self._new_prompt_len_snapshot: dict[str, int] = {}
@@ -115,6 +120,70 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
         """num_computed_tokens minus async placeholders (KV actually on GPU)."""
         # Output placeholders are zero when async scheduling isn't used
         return request.num_computed_tokens - request.num_output_placeholders
+
+    def _resolve_kv_connector_type(self) -> str:
+        """Connector backend name for the ``kv_wait_s`` label, or ``unknown``."""
+        connector_cfg = self._get_omni_kv_config_value("connector_config")
+        if isinstance(connector_cfg, dict):
+            c_type = connector_cfg.get("type")
+            if isinstance(c_type, str) and c_type:
+                return c_type
+        return "unknown"
+
+    def _emit_kv_wait_output(
+        self,
+        outputs: dict[int, list[OmniEngineCoreOutput]],
+        req_id: str,
+        req: Request,
+    ) -> None:
+        """Carry the KV-wait duration for ``req_id`` across the process boundary.
+
+        Pops the start ts recorded at ENTER (``_free_request``); skips silently
+        when none was recorded. The wait rides ``kv_transfer_params`` to the
+        orchestrator, which calls ``observe_kv_wait``.
+        """
+        start_ts = self._kv_wait_start_ts.pop(req_id, None)
+        if start_ts is None:
+            return
+        kv_wait_s = max(time.monotonic() - start_ts, 0.0)
+        outputs.setdefault(req.client_index, []).append(
+            OmniEngineCoreOutput(
+                request_id=req_id,
+                new_token_ids=[],
+                kv_transfer_params={
+                    "kv_wait_s": kv_wait_s,
+                    "connector_type": self._resolve_kv_connector_type(),
+                },
+            )
+        )
+
+    def _clear_kv_wait_starts(self, request_ids: Iterable[str]) -> None:
+        """Drop incomplete KV-wait measurements for terminal requests."""
+        wait_starts = getattr(self, "_kv_wait_start_ts", None)
+        if wait_starts is None:
+            return
+        for request_id in request_ids:
+            wait_starts.pop(request_id, None)
+
+    def finish_requests(
+        self,
+        request_ids: str | Iterable[str] | None,
+        finished_status: RequestStatus,
+    ) -> list[Request]:
+        """Finish requests and discard any incomplete KV-wait timing."""
+        if isinstance(request_ids, str):
+            cleanup_ids = (request_ids,)
+            finish_request_ids: str | tuple[str, ...] | None = request_ids
+        elif request_ids is None:
+            cleanup_ids = ()
+            finish_request_ids = None
+        else:
+            finish_request_ids = list(request_ids) if isinstance(request_ids, Iterator) else request_ids
+            cleanup_ids = tuple(finish_request_ids)
+
+        finished = super().finish_requests(finish_request_ids, finished_status)
+        self._clear_kv_wait_starts(cleanup_ids)
+        return finished
 
     def _get_kv_transfer_criteria(self) -> dict | None:
         return self._get_omni_kv_config_value("kv_transfer_criteria")
@@ -309,6 +378,11 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
                                 kv_transfer_params={"kv_ready": True},
                             )
                         )
+                    # EXIT: extraction ack ends the wait — carry the duration.
+                    # req is still alive here (the del happens in the cleanup
+                    # loop below); skip if it was already freed upstream.
+                    if req is not None:
+                        self._emit_kv_wait_output(outputs, req_id, req)
                 except Exception:
                     init_logger(__name__).exception("Failed to pre-process KV extraction for %s", req_id)
 
@@ -733,6 +807,7 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
                         # It triggered but hasn't finished yet. We MUST wait.
                         logger.debug(f"[Omni] Request {request_id} finished but transfer is still ACTIVE. Waiting.")
                         self.waiting_for_transfer_free.add(request_id)
+                        self._kv_wait_start_ts[request_id] = time.monotonic()
                         kv_xfer_params = None
                         return kv_xfer_params, None
                     elif request_id in self.waiting_for_transfer_free:
@@ -745,6 +820,7 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
                         )
                 else:
                     self.waiting_for_transfer_free.add(request_id)
+                    self._kv_wait_start_ts[request_id] = time.monotonic()
                     confirmed_computed = self._get_confirmed_num_computed_tokens(request)
                     self._mark_request_for_kv_transfer(request_id, confirmed_computed)
                     # Return KV transfer metadata so it propagates to RequestOutput
