@@ -552,6 +552,54 @@ async def test_native_realtime_protocol_conversation_item_create_commits_user_te
 
 
 @pytest.mark.asyncio
+async def test_function_output_is_recorded_only_after_runtime_delivery():
+    ws = TimedWebSocket()
+    protocol = NativeRealtimeSessionProtocol(ws)  # type: ignore[arg-type]
+    protocol.bind_sender(ws.send_json)
+    protocol.encode_outbound_event(
+        {
+            "type": "conversation.item.created",
+            "item": {
+                "id": "item-call",
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "weather",
+                "arguments": "{}",
+                "status": "completed",
+            },
+        }
+    )
+    event = {
+        "type": "conversation.item.create",
+        "item": {
+            "id": "item-output",
+            "type": "function_call_output",
+            "call_id": "call-1",
+            "output": '{"temperature":20}',
+        },
+    }
+
+    first = await protocol._to_duplex_event(event)
+    retry = await protocol._to_duplex_event(event)
+
+    assert first is not None
+    assert retry is not None
+    assert "item-output" not in protocol._conversation_items
+
+    delivered_item = first["payload"]["item"]
+    protocol.encode_outbound_event(
+        {
+            "type": "conversation.item.created",
+            "item": delivered_item,
+        }
+    )
+
+    assert protocol._conversation_items["item-output"] == delivered_item
+    assert await protocol._to_duplex_event(event) is None
+    assert ws.sent[-1]["error"]["code"] == "invalid_function_call_output"
+
+
+@pytest.mark.asyncio
 async def test_native_realtime_protocol_audio_commit_requires_non_empty_buffer():
     ws = TimedWebSocket()
     protocol = NativeRealtimeSessionProtocol(ws)  # type: ignore[arg-type]
@@ -5481,7 +5529,7 @@ async def test_failed_native_append_prevents_queued_append_from_running():
 
 
 @pytest.mark.asyncio
-async def test_failed_final_append_keeps_committed_audio_for_response_retry():
+async def test_failed_final_append_discards_retained_audio_without_retry():
     failed_result = {
         "operation": "append",
         "session_id": "sid-final-append-retry",
@@ -5490,15 +5538,7 @@ async def test_failed_final_append_keeps_committed_audio_for_response_retry():
         "error_count": 1,
         "stage_results": [],
     }
-    successful_result = {
-        "operation": "append",
-        "session_id": "sid-final-append-retry",
-        "ok": True,
-        "unsupported_count": 0,
-        "error_count": 0,
-        "stage_results": [],
-    }
-    engine = FakeEngineClient(append_results=[failed_result, successful_result])
+    engine = FakeEngineClient(append_result=failed_result)
     handler = OmniDuplexSessionHandler(
         chat_service=FakeChatService(engine),
         config_timeout_s=0.1,
@@ -5523,15 +5563,18 @@ async def test_failed_final_append_keeps_committed_audio_for_response_retry():
 
     handler_task = asyncio.create_task(handler.handle_session(ws))
     for _ in range(100):
-        if len(engine.appended) >= 2:
+        state = handler._serving_runtime_adapter.session_states.get("sid-final-append-retry")
+        if len(engine.appended) >= 1 and state is not None and state.committed_audio_payload is None:
             break
         await asyncio.sleep(0.01)
+    state = handler._serving_runtime_adapter.session_states["sid-final-append-retry"]
+    assert state.committed_audio_payload is None
+    assert state.committed_audio_reserved_bytes == 0
+    assert handler._registry.get("sid-final-append-retry").pending_input_bytes == 0
     ws.put({"type": "session.close"})
     await asyncio.wait_for(handler_task, timeout=2)
 
-    assert len(engine.appended) == 2
-    assert engine.appended[0][2]["audio"] == engine.appended[1][2]["audio"]
-    assert engine.append_operation_ids[0] == engine.append_operation_ids[1]
+    assert len(engine.appended) == 1
 
 
 @pytest.mark.asyncio

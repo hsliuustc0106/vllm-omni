@@ -1728,6 +1728,10 @@ class OmniDuplexSessionHandler(
                 session.truncate_history_item(item_id, audio_end_ms=committed_ms)
         new_epoch, old_playback = self._advance_barge_in_epoch(session)
         if old_request_id is not None:
+            # Epoch-scoped request ids prevent state reuse, but explicitly
+            # release projector/parser cursors so cancelled epochs do not
+            # accumulate until the whole session closes.
+            self._serving_runtime_adapter.data_plane.close_stream(old_request_id)
             await self._abort_request_background(
                 session,
                 old_request_id,
