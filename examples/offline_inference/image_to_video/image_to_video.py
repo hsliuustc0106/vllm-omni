@@ -227,7 +227,10 @@ def parse_args() -> argparse.Namespace:
         "--layerwise-offload-components",
         type=str,
         default=None,
-        help="Comma-separated component groups to offload (for example: text_encoder,image_encoder).",
+        help=(
+            "Comma-separated component groups to offload. Unset selects dit; "
+            "default selects text_encoder,image_encoder,vae; all selects every group."
+        ),
     )
     parser.add_argument(
         "--enforce-eager",

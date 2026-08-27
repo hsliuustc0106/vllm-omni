@@ -787,7 +787,8 @@ class OmniDiffusionConfig:
     enable_layerwise_offload: bool = False
     # Distributed layer-wise offloading with H2D + AllGather overlap (RFC-1)
     enable_distributed_layerwise_offload: bool = False
-    # Optional component filter: dit,text_encoder,vae. None selects all.
+    # Optional component filter: dit,text_encoder,image_encoder,vae.
+    # None preserves the existing DiT-only behavior.
     layerwise_offload_components: str | list[str] | None = None
     # If True: shard weights 1/dp_size + AllGather (saves CPU memory, requires
     # concurrent requests in DP mode). If False: each rank streams the standard

@@ -27,13 +27,14 @@ LAYERWISE_OFFLOAD_COMPONENTS = frozenset(
     {DIT_COMPONENT, TEXT_ENCODER_COMPONENT, IMAGE_ENCODER_COMPONENT, VAE_COMPONENT}
 )
 LAYERWISE_OFFLOAD_SELECTORS = LAYERWISE_OFFLOAD_COMPONENTS | {ALL_COMPONENT, DEFAULT_COMPONENT}
-DEFAULT_LAYERWISE_OFFLOAD_COMPONENTS = frozenset({TEXT_ENCODER_COMPONENT, IMAGE_ENCODER_COMPONENT, VAE_COMPONENT})
+OMITTED_LAYERWISE_OFFLOAD_COMPONENTS = frozenset({DIT_COMPONENT})
+DEFAULT_SELECTOR_COMPONENTS = frozenset({TEXT_ENCODER_COMPONENT, IMAGE_ENCODER_COMPONENT, VAE_COMPONENT})
 
 
 def parse_layerwise_offload_components(value: str | Collection[str] | None) -> frozenset[str]:
     """Normalize the public component selection into validated names."""
     if value is None:
-        return LAYERWISE_OFFLOAD_COMPONENTS
+        return OMITTED_LAYERWISE_OFFLOAD_COMPONENTS
     if isinstance(value, str):
         values = value.split(",")
     elif isinstance(value, Collection):
@@ -61,7 +62,7 @@ def parse_layerwise_offload_components(value: str | Collection[str] | None) -> f
     normalized = set(components)
     if DEFAULT_COMPONENT in normalized:
         normalized.remove(DEFAULT_COMPONENT)
-        normalized.update(DEFAULT_LAYERWISE_OFFLOAD_COMPONENTS)
+        normalized.update(DEFAULT_SELECTOR_COMPONENTS)
     return frozenset(normalized)
 
 
@@ -119,7 +120,7 @@ class OffloadConfig:
     # Optional per-worker ceiling for registering an HWR mmap. Zero means no
     # additional ceiling; pin_cpu_memory controls whether registration is tried.
     dlo_host_registration_limit_gib: float = 0.0
-    components: frozenset[str] = LAYERWISE_OFFLOAD_COMPONENTS
+    components: frozenset[str] = OMITTED_LAYERWISE_OFFLOAD_COMPONENTS
 
     def __post_init__(self) -> None:
         self.components = parse_layerwise_offload_components(self.components)

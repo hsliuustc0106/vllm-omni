@@ -60,7 +60,7 @@ omni = Omni(
 | Flag | Meaning | Default |
 | --- | --- | --- |
 | `--enable-distributed-layerwise-offload` | Enable DLO | `false` |
-| `--layerwise-offload-components LIST` | Select DiT, encoder, and VAE categories; DLO requires `dit` | all categories |
+| `--layerwise-offload-components LIST` | Select DiT, encoder, and VAE categories; DLO requires `dit` | `dit` |
 | `--data-parallel-size N` | DP ranks and AllGather weight-sharding group | `1` |
 | `--dlo-use-allgather` | Shard host weights and reconstruct with AllGather | `true` |
 | `--dlo-no-use-allgather` | Stream complete rank-local blocks without a DLO weight collective | `false` |

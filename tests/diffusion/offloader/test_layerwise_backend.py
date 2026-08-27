@@ -596,10 +596,12 @@ class TestLayerwiseComponentConfig:
         assert csv_config.components == frozenset({"dit", "text_encoder"})
         assert sequence_config.components == frozenset({"vae", "image_encoder"})
 
-    def test_omitted_selector_preserves_model_aware_behavior(self):
+    def test_omitted_selector_preserves_legacy_dit_only_behavior(self):
         config = OffloadConfig.from_od_config(_offload_od_config(enable_layerwise_offload=True))
 
-        assert config.components == frozenset({"dit", "text_encoder", "image_encoder", "vae"})
+        assert config.components == frozenset({"dit"})
+        assert config.offloads("dit")
+        assert not config.offloads("text_encoder")
 
     def test_sglang_all_and_default_aliases(self):
         all_config = OffloadConfig.from_od_config(

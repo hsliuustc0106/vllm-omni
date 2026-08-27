@@ -44,18 +44,18 @@ vllm serve Wan-AI/Wan2.2-T2V-A14B-Diffusers \
 Use `--layerwise-offload-components` with any comma-separated subset of
 `dit,text_encoder,image_encoder,vae`:
 
-- Omitting the option, or using `all`, selects all four categories. A category
-  is offloaded only when the model declares a safe block topology or on-demand
-  lifecycle; otherwise that module remains resident.
+- Omitting the option selects `dit`, preserving the existing DiT-only behavior.
+- `all` selects all four categories. A category is offloaded only when the model
+  declares a safe block topology or on-demand lifecycle; otherwise that module
+  remains resident.
 - `default` selects `text_encoder,image_encoder,vae` and leaves the DiT
   resident. It is valid for ordinary layerwise offload only.
 - An explicit subset such as `dit,text_encoder` controls only those categories.
 
 ```bash
-# DiT-only behavior
+# Backward-compatible DiT-only behavior
 vllm serve /path/to/model --omni \
-  --enable-layerwise-offload \
-  --layerwise-offload-components dit
+  --enable-layerwise-offload
 
 # Stream a model-declared text encoder while keeping the DiT resident
 vllm serve /path/to/model --omni \

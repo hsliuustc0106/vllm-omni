@@ -719,9 +719,9 @@ class OmniServeCommand(CLISubcommand):
             help="Comma-separated model components within the diffusion stage "
             "controlled by layerwise offload: "
             "dit,text_encoder,image_encoder,vae,all,default. Omitting the "
-            "option or using all selects every category; default selects "
-            "text_encoder,image_encoder,vae. Distributed layerwise offload "
-            "requires dit or all.",
+            "option preserves DiT-only offload; all selects every category; "
+            "default selects text_encoder,image_encoder,vae. Distributed "
+            "layerwise offload requires the selection to include dit.",
         )
         omni_config_group.add_argument(
             "--dlo-use-allgather",
