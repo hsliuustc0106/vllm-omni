@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 from __future__ import annotations
 
 from itertools import chain
@@ -41,7 +41,7 @@ class LayerwiseOffloadHook(ModelHook):
         self,
         next_block: nn.Module,
         device: torch.device,
-        stream: current_omni_platform.Stream | None = None,
+        stream: Any | None = None,
         pin_memory: bool = True,
     ):
         assert isinstance(next_block, nn.Module), "transformer block must be type `torch.nn.Module`"
@@ -52,7 +52,7 @@ class LayerwiseOffloadHook(ModelHook):
         self.pin_memory = pin_memory
 
         # Per-block synchronization primitive: set after H2D copy completes.
-        self._prefetch_done: current_omni_platform.Event | None = None
+        self._prefetch_done: Any | None = None
 
         # Backward link to the hook that is responsible for prefetching *this* block's weights
         self._prev_hook: LayerwiseOffloadHook | None = None
@@ -95,8 +95,8 @@ class LayerwiseOffloadHook(ModelHook):
         self.block_parameters: dict[str, nn.Parameter] = dict(module.named_parameters())
         self.block_buffers: dict[str, torch.Tensor] = dict(module.named_buffers())
 
-        self.next_block_parameters: dict[str, nn.Parameter] = dict(self.next_block.named_parameters())
-        self.next_block_buffers: dict[str, torch.Tensor] = dict(self.next_block.named_buffers())
+        self.next_block_parameters = dict(self.next_block.named_parameters())
+        self.next_block_buffers = dict(self.next_block.named_buffers())
 
         # Pre-allocate gpu tensors in a flattened way
         self.dtype_cpu_flattened_weights, self.dtype_metadata = LayerwiseOffloadHook._to_cpu(
@@ -287,7 +287,7 @@ def apply_block_hook(
     module: nn.Module,
     next_block: nn.Module,
     device: torch.device,
-    stream: current_omni_platform.Stream | None = None,
+    stream: Any | None = None,
     pin_memory: bool = True,
 ) -> LayerwiseOffloadHook:
     registry = HookRegistry.get_or_create(module)
@@ -308,8 +308,11 @@ def _move_encoder_non_block_state_to_device(
     module: nn.Module,
     block_groups: list[nn.ModuleList],
     device: torch.device,
+    *,
+    excluded_tensors: set[int] | None = None,
 ) -> None:
     """Keep encoder state outside streamed block lists resident on device."""
+    excluded_tensors = excluded_tensors or set()
     block_tensors = {
         id(tensor)
         for blocks in block_groups
@@ -317,7 +320,7 @@ def _move_encoder_non_block_state_to_device(
         for tensor in chain(block.parameters(), block.buffers())
     }
     for tensor in chain(module.parameters(), module.buffers()):
-        if id(tensor) in block_tensors:
+        if id(tensor) in block_tensors or id(tensor) in excluded_tensors:
             continue
         local = tensor.to_local() if isinstance(tensor, DTensor) else tensor
         if local.device == device:
@@ -328,13 +331,82 @@ def _move_encoder_non_block_state_to_device(
         )
 
 
+def _enable_host_resident_encoder_tables(
+    module: nn.Module,
+    name: str,
+    plan: OffloadPlan,
+    device: torch.device,
+) -> set[int]:
+    """Keep explicitly safe gather tables on CPU and bridge their results."""
+    table_paths = plan.encoder_host_resident_table_attrs.get(name, ())
+    if not table_paths:
+        return set()
+
+    resolved_tables: list[tuple[str, nn.Module, nn.Parameter]] = []
+    for table_path in table_paths:
+        try:
+            table = attrgetter(table_path)(module)
+        except AttributeError as exc:
+            raise ValueError(f"Encoder host-resident table path {name}.{table_path} was not found") from exc
+        weight = getattr(table, "weight", None)
+        if not isinstance(table, nn.Module) or not isinstance(weight, nn.Parameter) or weight.ndim != 2:
+            raise ValueError(f"Encoder host-resident table {name}.{table_path} must be a module with a 2D weight")
+        if isinstance(weight, DTensor) or getattr(table, "tp_size", 1) != 1:
+            raise ValueError(f"Encoder host-resident table {name}.{table_path} must not be tensor-parallel sharded")
+        resolved_tables.append((table_path, table, weight))
+
+    tables: list[nn.Module] = []
+    handles: list[Any] = []
+    excluded_tensors: set[int] = set()
+    for table_path, table, weight in resolved_tables:
+        table.to("cpu")
+
+        def inputs_to_host(_table: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]):
+            if not args or not torch.is_tensor(args[0]):
+                return args, kwargs
+            return (args[0].to("cpu"), *args[1:]), kwargs
+
+        def output_to_device(_table: nn.Module, _args: tuple[Any, ...], output: Any):
+            if not torch.is_tensor(output):
+                raise TypeError("A host-resident encoder table must return a Tensor")
+            return output.to(device, non_blocking=True)
+
+        handles.append(table.register_forward_pre_hook(inputs_to_host, with_kwargs=True))
+        handles.append(table.register_forward_hook(output_to_device))
+        tables.append(table)
+        excluded_tensors.update(id(tensor) for tensor in chain(table.parameters(), table.buffers()))
+        logger.info(
+            "Keeping encoder table %s.%s (%.2f GiB) in host memory",
+            name,
+            table_path,
+            weight.numel() * weight.element_size() / 1024**3,
+        )
+
+    module._omni_host_resident_tables = tables
+    module._omni_host_resident_table_handles = handles
+    module._omni_host_resident_table_device = device
+    return excluded_tensors
+
+
+def _disable_host_resident_encoder_tables(module: nn.Module) -> None:
+    for handle in getattr(module, "_omni_host_resident_table_handles", []):
+        handle.remove()
+    device = getattr(module, "_omni_host_resident_table_device", None)
+    if device is not None:
+        for table in getattr(module, "_omni_host_resident_tables", []):
+            table.to(device)
+    module._omni_host_resident_tables = []
+    module._omni_host_resident_table_handles = []
+    module._omni_host_resident_table_device = None
+
+
 def enable_plan_encoder_layerwise_offload(
     module: nn.Module,
     name: str,
     plan: OffloadPlan | None,
     *,
     device: torch.device,
-    stream: current_omni_platform.Stream,
+    stream: Any,
     pin_memory: bool,
 ) -> bool:
     """Apply rank-local layerwise hooks to plan-declared encoder stacks."""
@@ -370,7 +442,13 @@ def enable_plan_encoder_layerwise_offload(
 
     if not hooks:
         return False
-    _move_encoder_non_block_state_to_device(module, block_groups, device)
+    excluded_tensors = _enable_host_resident_encoder_tables(module, name, plan, device)
+    _move_encoder_non_block_state_to_device(
+        module,
+        block_groups,
+        device,
+        excluded_tensors=excluded_tensors,
+    )
     module._omni_layerwise_hooks = hooks
     module._omni_layerwise_block_groups = block_groups
     module._omni_layerwise_enabled = True
@@ -394,9 +472,18 @@ def disable_plan_encoder_layerwise_offload(module: nn.Module) -> None:
     for blocks in getattr(module, "_omni_layerwise_block_groups", []):
         for block in blocks:
             remove_block_hook(block)
+    _disable_host_resident_encoder_tables(module)
     module._omni_layerwise_hooks = []
     module._omni_layerwise_block_groups = []
     module._omni_layerwise_enabled = False
+
+
+def validate_on_demand_component(module: nn.Module, name: str) -> None:
+    """Fail before hook installation when a declared lifecycle is incomplete."""
+    if not callable(getattr(module, "load_to_device", None)) or not callable(getattr(module, "offload_to_cpu", None)):
+        raise ValueError(
+            f"Component {name!r} declares on-demand offload but must implement load_to_device() and offload_to_cpu()"
+        )
 
 
 class LayerWiseOffloadBackend(OffloadBackend):
@@ -424,15 +511,9 @@ class LayerWiseOffloadBackend(OffloadBackend):
         blockwise: bool,
         stage_on_demand: bool,
     ) -> None:
-        load_to_device = getattr(module, "load_to_device", None)
-        offload_to_cpu = getattr(module, "offload_to_cpu", None)
         if selected and stage_on_demand:
-            if not (callable(load_to_device) and callable(offload_to_cpu)):
-                raise ValueError(
-                    f"Component {name!r} declares on-demand offload but must "
-                    "implement load_to_device() and offload_to_cpu()"
-                )
-            offload_to_cpu()
+            validate_on_demand_component(module, name)
+            getattr(module, "offload_to_cpu")()
             self._staged_components.append(module)
             logger.info("Prepared %s for pipeline-managed staged offload", name)
             return
@@ -449,6 +530,14 @@ class LayerWiseOffloadBackend(OffloadBackend):
         plan = get_offload_plan(pipeline)
         if not modules.dits and self.config.offloads(DIT_COMPONENT):
             logger.warning("No DiT/transformer modules found, skipping layer-wise offloading")
+
+        if plan is not None:
+            for enc, enc_name in zip(modules.encoders, modules.encoder_names):
+                if self.config.offloads_encoder(enc_name, plan) and enc_name in plan.on_demand_component_paths:
+                    validate_on_demand_component(enc, enc_name)
+            for vae, vae_name in zip(modules.vaes, modules.vae_names):
+                if self.config.offloads(VAE_COMPONENT) and vae_name in plan.on_demand_component_paths:
+                    validate_on_demand_component(vae, vae_name)
 
         for enc, enc_name in zip(modules.encoders, modules.encoder_names):
             selected = self.config.offloads_encoder(enc_name, plan)
@@ -472,16 +561,13 @@ class LayerWiseOffloadBackend(OffloadBackend):
 
         for vae, vae_name in zip(modules.vaes, modules.vae_names):
             selected = self.config.offloads(VAE_COMPONENT)
-            try:
-                self._prepare_component(
-                    vae,
-                    vae_name,
-                    selected=selected,
-                    blockwise=False,
-                    stage_on_demand=bool(selected and plan is not None and vae_name in plan.on_demand_component_paths),
-                )
-            except Exception as exc:
-                logger.debug("Failed to prepare VAE %s: %s", vae_name, exc)
+            self._prepare_component(
+                vae,
+                vae_name,
+                selected=selected,
+                blockwise=False,
+                stage_on_demand=bool(selected and plan is not None and vae_name in plan.on_demand_component_paths),
+            )
 
         # Move resident modules to GPU (small modules needed every forward)
         for name, module in zip(modules.resident_names, modules.resident_modules):

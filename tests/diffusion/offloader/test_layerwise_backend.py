@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 """Unit tests for LayerwiseOffloadHook and LayerWiseOffloadBackend utilities."""
 
 import gc
-import os
-import socket
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -16,6 +14,7 @@ from torch import nn
 from torch.distributed.tensor import DeviceMesh, DTensor, Replicate
 
 import vllm_omni.diffusion.offloader.layerwise_backend as layerwise_backend_module
+from tests.helpers.runtime import get_distributed_init_method
 from vllm_omni.diffusion.offloader.base import OffloadConfig, OffloadStrategy
 from vllm_omni.diffusion.offloader.layerwise_backend import (
     LayerWiseOffloadBackend,
@@ -45,26 +44,9 @@ def dummy_stream(_stream):
     yield None
 
 
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-def _set_dist_env(*, rank: int, world_size: int, master_port: int) -> None:
-    os.environ["RANK"] = str(rank)
-    os.environ["LOCAL_RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = str(master_port)
-
-
 def _cleanup_distributed() -> None:
     if dist.is_initialized():
         dist.destroy_process_group()
-
-    for key in ["MASTER_ADDR", "MASTER_PORT", "RANK", "WORLD_SIZE", "LOCAL_RANK"]:
-        os.environ.pop(key, None)
 
     gc.collect()
     if current_omni_platform.is_available():
@@ -74,10 +56,7 @@ def _cleanup_distributed() -> None:
 
 @pytest.fixture(scope="module")
 def dist_group():
-    master_port = _find_free_port()
-    _set_dist_env(rank=0, world_size=1, master_port=master_port)
-
-    dist.init_process_group("gloo", rank=0, world_size=1)
+    dist.init_process_group("gloo", rank=0, world_size=1, init_method=get_distributed_init_method())
     try:
         yield
     finally:
@@ -160,25 +139,6 @@ class TestLayerwiseOffloadHook:
 
         assert next_block.weight.stride() == expected_stride
         assert torch.equal(next_block.weight, expected)
-
-
-def test_layerwise_hook_preserves_packed_stride(patched_offload_runtime):
-    current_block = nn.Linear(2, 2)
-    next_block = nn.Module()
-    expected = torch.arange(12, dtype=torch.float32).reshape(3, 4).t()
-    next_block.weight = nn.Parameter(expected.clone(memory_format=torch.preserve_format))
-    hook = LayerwiseOffloadHook(
-        next_block=next_block,
-        device=torch.device("cpu"),
-        stream=DummyStream(),
-        pin_memory=False,
-    )
-
-    hook.initialize_hook(current_block)
-    hook.prefetch_layer(non_blocking=False)
-
-    assert next_block.weight.stride() == expected.stride() == (1, 4)
-    assert torch.equal(next_block.weight, expected)
 
 
 class _DummyBlock(nn.Module):
@@ -344,6 +304,12 @@ class _PlainEncoder(nn.Module):
         self.final_norm = nn.Linear(2, 2)
 
 
+class _HostTableEncoder(_PlainEncoder):
+    def __init__(self):
+        super().__init__()
+        self.shared = nn.Embedding(32, 4)
+
+
 class _PlainImageEncoder(nn.Module):
     """Standard vision encoder using the Hugging Face CLIP module layout."""
 
@@ -391,6 +357,19 @@ class _GenericEncoderPipeline(nn.Module):
         self.text_encoder = _PlainEncoder()
 
 
+class _HostTableEncoderPipeline(nn.Module):
+    _offload_plan = OffloadPlan(
+        encoder_component_types={"text_encoder": "text_encoder"},
+        encoder_block_attrs={"text_encoder": ("encoder.block",)},
+        encoder_host_resident_table_attrs={"text_encoder": ("shared",)},
+    )
+
+    def __init__(self):
+        super().__init__()
+        self.transformer = _SingleBlockModel()
+        self.text_encoder = _HostTableEncoder()
+
+
 class _DualEncoderPipeline(nn.Module):
     _offload_plan = OffloadPlan(
         encoder_component_types={
@@ -415,7 +394,7 @@ class TestLayerwiseComponentSelection:
         pipeline = _ComponentPipeline()
         backend = LayerWiseOffloadBackend(
             OffloadConfig(
-                strategy=OffloadStrategy.LAYERWISE,
+                strategy=OffloadStrategy.LAYER_WISE,
                 pin_cpu_memory=False,
                 components=frozenset({"text_encoder"}),
             ),
@@ -439,7 +418,7 @@ class TestLayerwiseComponentSelection:
         pipeline = _ComponentPipeline()
         backend = LayerWiseOffloadBackend(
             OffloadConfig(
-                strategy=OffloadStrategy.LAYERWISE,
+                strategy=OffloadStrategy.LAYER_WISE,
                 pin_cpu_memory=False,
                 components=frozenset({"dit"}),
             ),
@@ -463,7 +442,7 @@ class TestLayerwiseComponentSelection:
         pipeline.text_encoder = _StagedEncoder()
         backend = LayerWiseOffloadBackend(
             OffloadConfig(
-                strategy=OffloadStrategy.LAYERWISE,
+                strategy=OffloadStrategy.LAYER_WISE,
                 pin_cpu_memory=False,
                 components=frozenset({"text_encoder"}),
             ),
@@ -473,11 +452,25 @@ class TestLayerwiseComponentSelection:
         with pytest.raises(ValueError, match="None of the selected layerwise offload components"):
             backend.enable(pipeline)
 
+    def test_declared_on_demand_component_requires_lifecycle(self, patched_offload_runtime):
+        pipeline = _ComponentPipeline()
+        backend = LayerWiseOffloadBackend(
+            OffloadConfig(
+                strategy=OffloadStrategy.LAYER_WISE,
+                pin_cpu_memory=False,
+                components=frozenset({"vae"}),
+            ),
+            torch.device("cpu"),
+        )
+
+        with pytest.raises(ValueError, match="implement load_to_device"):
+            backend.enable(pipeline)
+
     def test_default_selection_preserves_unplanned_auxiliaries(self, patched_offload_runtime):
         pipeline = _LegacyComponentPipeline()
         backend = LayerWiseOffloadBackend(
             OffloadConfig(
-                strategy=OffloadStrategy.LAYERWISE,
+                strategy=OffloadStrategy.LAYER_WISE,
                 pin_cpu_memory=False,
             ),
             torch.device("cpu"),
@@ -498,7 +491,7 @@ class TestLayerwiseComponentSelection:
         pipeline = _DualEncoderPipeline()
         backend = LayerWiseOffloadBackend(
             OffloadConfig(
-                strategy=OffloadStrategy.LAYERWISE,
+                strategy=OffloadStrategy.LAYER_WISE,
                 pin_cpu_memory=False,
                 components=frozenset({"image_encoder"}),
             ),
@@ -520,7 +513,7 @@ class TestLayerwiseComponentSelection:
         pipeline = _GenericEncoderPipeline()
         backend = LayerWiseOffloadBackend(
             OffloadConfig(
-                strategy=OffloadStrategy.LAYERWISE,
+                strategy=OffloadStrategy.LAYER_WISE,
                 pin_cpu_memory=False,
                 components=frozenset({"text_encoder"}),
             ),
@@ -539,6 +532,34 @@ class TestLayerwiseComponentSelection:
         assert not pipeline.text_encoder._omni_layerwise_enabled
         assert all(block._hook_registry.get_hook("layerwise_offload") is None for block in blocks)
         assert all(block.weight.numel() == 100 for block in blocks)
+
+    def test_declared_vocab_table_stays_on_host_and_hooks_are_reentrant(self, patched_offload_runtime):
+        pipeline = _HostTableEncoderPipeline()
+        expected_weight = pipeline.text_encoder.shared.weight.detach().clone()
+        backend = LayerWiseOffloadBackend(
+            OffloadConfig(
+                strategy=OffloadStrategy.LAYER_WISE,
+                pin_cpu_memory=False,
+                components=frozenset({"text_encoder"}),
+            ),
+            torch.device("cpu"),
+        )
+
+        backend.enable(pipeline)
+
+        table = pipeline.text_encoder.shared
+        assert table.weight.device.type == "cpu"
+        assert len(pipeline.text_encoder._omni_host_resident_table_handles) == 2
+        token_ids = torch.tensor([[1, 3, 5]])
+        assert torch.equal(table(token_ids), torch.nn.functional.embedding(token_ids, expected_weight))
+
+        backend.disable()
+        assert not table._forward_pre_hooks
+        assert not table._forward_hooks
+
+        backend.enable(pipeline)
+        assert len(pipeline.text_encoder._omni_host_resident_table_handles) == 2
+        backend.disable()
 
 
 def _offload_od_config(**overrides):
@@ -647,5 +668,5 @@ class TestLayerwiseComponentConfig:
             )
         )
 
-        assert config.strategy is OffloadStrategy.LAYERWISE
+        assert config.strategy is OffloadStrategy.LAYER_WISE
         assert config.components == frozenset({"text_encoder"})

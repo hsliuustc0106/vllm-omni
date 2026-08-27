@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -41,6 +42,7 @@ def test_i2v_pipeline_declares_text_and_image_encoder_offload_blocks() -> None:
         "text_encoder": ("encoder.block",),
         "image_encoder": ("vision_model.encoder.layers",),
     }
+    assert plan.encoder_host_resident_table_attrs == {"text_encoder": ("shared",)}
     assert plan.on_demand_component_paths == frozenset()
 
 
@@ -59,7 +61,7 @@ def _make_i2v_pipeline(*, expand_timesteps: bool) -> Wan22I2VPipeline:
 
 
 def _make_i2v_sampling(**overrides):
-    values = {
+    values: dict[str, Any] = {
         "height": 16,
         "width": 16,
         "num_frames": 5,

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 """
 Async Omni Engine for vLLM-Omni multi-stage runtime.
 
@@ -47,6 +50,7 @@ from vllm_omni.engine.async_engine_utils import (
 )
 from vllm_omni.engine.messages import (
     AbortRequestMessage,
+    AbortResultMessage,
     AddCompanionRequestMessage,
     CollectiveRPCRequestMessage,
     CollectiveRPCResultMessage,
@@ -103,7 +107,10 @@ class AsyncOmniEngine:
     _log_stats: bool = False
     _coordinator_runtime: Any = None
     _transfer_emitter: Any = None
+    _prom_metrics: Any = None
     _enable_orch_monitor: bool = False
+    # Lazily created by get_output_blocking_async().
+    _output_drain_executor: concurrent.futures.ThreadPoolExecutor | None = None
 
     def __init__(
         self,
@@ -113,6 +120,7 @@ class AsyncOmniEngine:
         diffusion_batch_size: int = 1,
         single_stage_mode: bool = False,
         transfer_emitter: Any = None,
+        prom_metrics: Any = None,
         log_stats: bool = False,
         tokenizer: str | None = None,
         trust_remote_code: bool | None = None,
@@ -129,6 +137,7 @@ class AsyncOmniEngine:
         # Optional: when None, Orchestrator silently skips TX emit (existing
         # RX path still works via OrchestratorAggregator).
         self._transfer_emitter = transfer_emitter
+        self._prom_metrics = prom_metrics
         # Drives upstream EngineCore + scheduler stats production. When False
         # the engine skips SchedulerStats / IterationStats; the per-(stage,
         # replica) vllm:* wrap stays registered but reads zero. Respects the
@@ -375,9 +384,13 @@ class AsyncOmniEngine:
                     getattr(self, "_duplex_runtime_extension_path", None)
                 )
                 if duplex_runtime_extension is not None:
+                    stage_clients = []
+                    for pool in self.stage_pools:
+                        assert pool.stage_client is not None
+                        stage_clients.append(pool.stage_client)
                     validate_duplex_runtime_extension(
                         duplex_runtime_extension,
-                        sampling_defaults=tuple(pool.stage_client.default_sampling_params for pool in self.stage_pools),
+                        sampling_defaults=tuple(client.default_sampling_params for client in stage_clients),
                     )
 
             orchestrator = Orchestrator(
@@ -390,6 +403,7 @@ class AsyncOmniEngine:
                 membership_controller=membership_controller,
                 running_counter=self._running_counter,
                 transfer_emitter=self._transfer_emitter,
+                prom_metrics=self._prom_metrics,
                 log_stats=self._log_stats,
                 enable_orch_monitor=self._enable_orch_monitor,
                 duplex_runtime_extension=duplex_runtime_extension,
@@ -685,6 +699,7 @@ class AsyncOmniEngine:
             )
 
             # Full input processing (tokenization, multimodal, etc.)
+            assert self.input_processor is not None
             _t_preprocess = time.perf_counter()
             try:
                 request = self.input_processor.process_inputs(
@@ -743,23 +758,33 @@ class AsyncOmniEngine:
             enqueue_ts=time.perf_counter(),
         )
 
-    def _enqueue_cfg_companions(
+    def _build_cfg_companions(
         self,
         parent_id: str,
         original_prompt: Any,
         stage0_params: Any,
         sampling_params_list: list[Any],
-    ) -> None:
-        """Expand prompt into CFG companions, process through InputProcessor, and enqueue."""
-        try:
-            expanded = self.prompt_expand_func(original_prompt, stage0_params)
-        except Exception:
-            logger.exception("[AsyncOmniEngine] prompt_expand_func failed for req %s", parent_id)
-            return
+    ) -> list[AddCompanionRequestMessage]:
+        """Expand a prompt into its CFG companions, without enqueueing any.
 
+        Construction is separated from admission so a guided request is
+        all-or-nothing. A model whose guidance is mandatory cannot decode a
+        request whose companion never arrived: the pair never completes, the
+        request occupies scheduler and KV capacity for the scheduler's whole
+        hold budget, and then produces no audio. Raising here instead means the
+        caller learns immediately and nothing was admitted.
+
+        Raises:
+            Exception: Whatever prompt expansion or input processing raised.
+                The caller is expected to let it reach the client.
+        """
+        assert self.prompt_expand_func is not None
+        expanded = self.prompt_expand_func(original_prompt, stage0_params)
         if not expanded:
-            return
+            return []
 
+        companions: list[AddCompanionRequestMessage] = []
+        assert self.input_processor is not None
         for ep in expanded:
             cid = f"{parent_id}{ep.request_id_suffix}"
             companion_prompt = ep.prompt
@@ -775,6 +800,14 @@ class AsyncOmniEngine:
                 params=companion_params,
                 supported_tasks=self.supported_tasks,
             )
+            # Same restore the parent request gets: the upstream input
+            # processor drops omni-only prompt fields, so without this the
+            # companion reaches the worker with no additional_information at
+            # all. That is where ``global_request_id`` lives, and it is what
+            # was just injected above, so skipping it silently undoes the
+            # injection: the model sees the companion row with no id and
+            # cannot match it to its conditioned partner.
+            request = upgrade_to_omni_request(request, companion_prompt)
             request.external_req_id = cid
             # Companions are stage-0-final for ordinary downstream payloads,
             # but diffusion still needs their CFG KV caches.
@@ -783,7 +816,7 @@ class AsyncOmniEngine:
             # Registration of this companion on stage-0's output processor is
             # deferred to Orchestrator._handle_add_companion, which routes
             # admission through StagePool.submit_initial(..., affinity_request_id=...).
-            self.request_queue.sync_q.put(
+            companions.append(
                 AddCompanionRequestMessage(
                     companion_id=cid,
                     parent_id=parent_id,
@@ -793,11 +826,35 @@ class AsyncOmniEngine:
                     sampling_params_list=companion_spl,
                 )
             )
+        return companions
+
+    def _enqueue_cfg_companions(
+        self,
+        parent_id: str,
+        original_prompt: Any,
+        stage0_params: Any,
+        sampling_params_list: list[Any],
+    ) -> None:
+        """Build and enqueue CFG companions, tolerating a build failure.
+
+        Kept for callers that admit the parent first and cannot roll it back.
+        Prefer building with :meth:`_build_cfg_companions` before the parent is
+        admitted, so the pair is atomic.
+        """
+        try:
+            companions = self._build_cfg_companions(parent_id, original_prompt, stage0_params, sampling_params_list)
+        except Exception:
+            logger.exception("[AsyncOmniEngine] CFG companion build failed for req %s", parent_id)
+            return
+        for companion in companions:
+            self.request_queue.sync_q.put(companion)
+        if not companions:
+            return
 
         logger.info(
             "[AsyncOmniEngine] CFG expansion for req %s: %d companions",
             parent_id,
-            len(expanded),
+            len(companions),
         )
 
     @staticmethod
@@ -824,7 +881,7 @@ class AsyncOmniEngine:
                 "mag_max_skip_steps": 5,
                 "mag_retention_ratio": 0.1,
             }
-        if cache_backend in ("step_cache"):
+        if cache_backend == "step_cache":
             return {
                 "step_cache_dit_enabled": True,
                 "velocity_sim_thresholds": [0.95, 0.93],
@@ -931,7 +988,7 @@ class AsyncOmniEngine:
             ulysses_mode = normalized_kwargs.get("ulysses_mode") or "strict"
             sequence_parallel_size = normalized_kwargs.get("sequence_parallel_size")
             pipeline_parallel_size = normalized_kwargs.get("pipeline_parallel_size") or 1
-            data_parallel_size = normalized_kwargs.get("data_parallel_size") or 1
+            data_parallel_size = normalized_kwargs.get("data_parallel_size")
             tensor_parallel_size = normalized_kwargs.get("tensor_parallel_size") or 1
             cfg_parallel_size = normalized_kwargs.get("cfg_parallel_size") or 1
             pipeline_parallel_size = normalized_kwargs.get("pipeline_parallel_size") or 1
@@ -964,6 +1021,11 @@ class AsyncOmniEngine:
                 hsdp_replicate_size=hsdp_replicate_size,
             )
 
+        num_gpus = normalized_kwargs.get("num_gpus")
+        if num_gpus is not None:
+            num_gpus = int(num_gpus)
+            parallel_config.resolve_data_parallel_size(num_gpus)
+
         num_devices = max(1, int(parallel_config.world_size))
         devices = ",".join(str(i) for i in range(num_devices))
         model_class_name = kwargs.get("model_class_name", None)
@@ -973,15 +1035,20 @@ class AsyncOmniEngine:
         if (
             kwargs.get("diffusion_attention_config") is not None
             or kwargs.get("diffusion_attention_backend") is not None
+            or kwargs.get("fastvideo_vsa_topk") is not None
         ):
             attention_config = parse_attention_config(
                 kwargs.get("diffusion_attention_config"),
                 attention_backend=kwargs.get("diffusion_attention_backend"),
+                fastvideo_vsa_topk=kwargs.get("fastvideo_vsa_topk"),
             )
 
         stage_engine_args = {
             "max_num_seqs": kwargs.get("max_num_seqs") or 1,
             "parallel_config": parallel_config,
+            # Default-stage construction bypasses the structured projection.
+            # Runner selection remains owned by the selected engine/platform.
+            "engine_backend": kwargs.get("engine_backend", "default"),
             "model_class_name": kwargs.get("model_class_name", None),
             "task_type": kwargs.get("task_type", None),
             "model_config": kwargs.get("model_config", None),
@@ -999,6 +1066,9 @@ class AsyncOmniEngine:
             "layerwise_offload_components": kwargs.get("layerwise_offload_components", None),
             "dlo_use_allgather": kwargs.get("dlo_use_allgather", True),
             "dlo_resident_layers": kwargs.get("dlo_resident_layers", 0),
+            "host_weight_runtime_mode": kwargs.get("host_weight_runtime_mode", "disabled"),
+            "host_weight_runtime_root": kwargs.get("host_weight_runtime_root"),
+            "dlo_host_registration_limit_gib": kwargs.get("dlo_host_registration_limit_gib", 0.0),
             "enforce_eager": False if kwargs.get("enforce_eager") is None else kwargs.get("enforce_eager"),
             "diffusion_compile_granularity": (
                 "regional"
@@ -1018,9 +1088,7 @@ class AsyncOmniEngine:
             "custom_pipeline_args": kwargs.get("custom_pipeline_args", None),
             "worker_extension_cls": kwargs.get("worker_extension_cls", None),
             "trust_remote_code": (False if kwargs.get("trust_remote_code") is None else kwargs["trust_remote_code"]),
-            "distributed_executor_backend": (
-                "mp" if kwargs.get("distributed_executor_backend") is None else kwargs["distributed_executor_backend"]
-            ),
+            "distributed_executor_backend": kwargs.get("distributed_executor_backend"),
             "enable_sleep_mode": kwargs.get("enable_sleep_mode", False),
             "enable_prompt_embed_cache": kwargs.get("enable_prompt_embed_cache", False),
             "prompt_embed_cache_size": kwargs.get("prompt_embed_cache_size", 32),
@@ -1050,6 +1118,8 @@ class AsyncOmniEngine:
                 else {}
             ),
         }
+        if num_gpus is not None:
+            stage_engine_args["num_gpus"] = num_gpus
         # Only set dtype if it was already explicitly passed and normalized
         if "dtype" in normalized_kwargs:
             stage_engine_args["dtype"] = normalized_kwargs["dtype"]
@@ -1116,15 +1186,13 @@ class AsyncOmniEngine:
     ) -> tuple[str, list[Any]]:
         """Resolve stage configs and inject defaults shared by orchestrator/headless."""
 
+        for legacy_arg in ("stage_configs_path", "stage_configs"):
+            if legacy_arg in kwargs:
+                raise ValueError(f"`{legacy_arg}` is no longer supported; use `deploy_config` instead.")
+
         deploy_config_path = kwargs.pop("deploy_config", None)
         strategy_config_path = kwargs.pop("strategy_config", None)
         stage_overrides_json = kwargs.pop("stage_overrides", None)
-        explicit_stage_configs = kwargs.pop("stage_configs", None)
-        if explicit_stage_configs is not None:
-            logger.warning(
-                "`stage_configs` is not part of the public API. "
-                "Ignoring it and resolving stages from deploy_config/model factory."
-            )
 
         # Parse --stage-overrides JSON string if provided
         stage_overrides = parse_stage_overrides(stage_overrides_json)
@@ -1178,6 +1246,7 @@ class AsyncOmniEngine:
                 if (
                     kwargs.get("diffusion_attention_config") is not None
                     or kwargs.get("diffusion_attention_backend") is not None
+                    or kwargs.get("fastvideo_vsa_topk") is not None
                 ):
                     has_stage_attention = (
                         hasattr(cfg.engine_args, "diffusion_attention_config")
@@ -1187,6 +1256,7 @@ class AsyncOmniEngine:
                         cfg.engine_args.diffusion_attention_config = parse_attention_config(
                             kwargs.get("diffusion_attention_config"),
                             attention_backend=kwargs.get("diffusion_attention_backend"),
+                            fastvideo_vsa_topk=kwargs.get("fastvideo_vsa_topk"),
                         )
                 quantization_config = kwargs.get("diffusion_quantization_config") or kwargs.get("quantization_config")
                 if quantization_config is not None:
@@ -1279,16 +1349,28 @@ class AsyncOmniEngine:
             reasoning_ended=reasoning_ended,
             resumable=resumable,
         )
-        self.request_queue.sync_q.put(msg)
-
-        # CFG companion expansion: create and enqueue companion requests
-        # so the AR stage also generates their KV caches.
+        # CFG companions are built before the parent is admitted, so the group
+        # is all-or-nothing: a build failure raises here, nothing is enqueued,
+        # and the caller sees the error. Admitting the parent first would leave
+        # an orphan holding scheduler and KV capacity that can never complete,
+        # because a model whose guidance is mandatory cannot decode a request
+        # whose companion never arrived.
+        companions: list[AddCompanionRequestMessage] = []
         if self.prompt_expand_func is not None and final_stage_id > 0:
-            original_prompt = msg.original_prompt
             effective_spl = msg.sampling_params_list
             stage0_params = effective_spl[0] if effective_spl else None
             if stage0_params is not None:
-                self._enqueue_cfg_companions(request_id, original_prompt, stage0_params, effective_spl)
+                companions = self._build_cfg_companions(request_id, msg.original_prompt, stage0_params, effective_spl)
+
+        self.request_queue.sync_q.put(msg)
+        for companion in companions:
+            self.request_queue.sync_q.put(companion)
+        if companions:
+            logger.info(
+                "[AsyncOmniEngine] CFG expansion for req %s: %d companions",
+                request_id,
+                len(companions),
+            )
 
     async def add_request_async(
         self,
@@ -1660,19 +1742,92 @@ class AsyncOmniEngine:
                 raise RuntimeError("Orchestrator died unexpectedly. See logs above.")
             return None
 
+    async def get_output_blocking_async(self, timeout: float = 1.0) -> EngineQueueMessage | None:
+        """Blocking-wait read from the Orchestrator output queue.
+
+        Waits up to ``timeout`` seconds in a dedicated drain thread for the
+        next message (condition-variable wakeup instead of a poll cadence);
+        returns ``None`` on timeout so the caller keeps its liveness check,
+        mirroring ``try_get_output_async``'s contract. Used by the serving
+        final-output drain when ``VLLM_OMNI_EVENT_DRIVEN_ORCH`` is on.
+        """
+        executor = self._output_drain_executor
+        if executor is None:
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="omni-output-drain",
+            )
+            self._output_drain_executor = executor
+
+        sync_q = self.output_queue.sync_q
+
+        def _drain_get() -> EngineQueueMessage | None:
+            # Exceptions are swallowed to a None sentinel: the queue may be
+            # closed mid-shutdown, and an exception left on an executor future
+            # after task cancellation would warn as never-retrieved.
+            try:
+                return sync_q.get(timeout=timeout)
+            except queue.Empty:
+                return None
+            except Exception:
+                return None
+
+        loop = asyncio.get_running_loop()
+        msg = await loop.run_in_executor(executor, _drain_get)
+        if msg is None and not self.is_alive():
+            raise RuntimeError("Orchestrator died unexpectedly. See logs above.")
+        return msg
+
     def get_stage_metadata(self, stage_id: int) -> StageRuntimeInfo:
         """Get cached metadata for a stage."""
         return self.stage_metadata[stage_id]
 
     def abort(self, request_ids: list[str]) -> None:
-        """Send abort message to the Orchestrator."""
+        """Fire-and-forget abort: enqueue and return without waiting.
+
+        Prefer :meth:`abort_async` when the caller needs acknowledgment that
+        stage aborts, binding release, and orchestrator request cleanup finished.
+        """
         if self.request_queue is None:
             raise RuntimeError("request_queue is not initialized")
         self.request_queue.sync_q.put(AbortRequestMessage(request_ids=request_ids))
 
-    async def abort_async(self, request_ids: list[str]) -> None:
-        """Async abort API."""
-        self.abort(request_ids)
+    async def abort_async(
+        self,
+        request_ids: list[str],
+        timeout: float | None = None,
+    ) -> None:
+        """Abort requests and wait for orchestrator acknowledgment.
+
+        Unlike :meth:`abort`, this generates an ``rpc_id``, correlates the
+        :class:`AbortResultMessage` via :class:`CorrelatedRpcClient`, and
+        raises if the orchestrator reports failure or times out.
+        """
+        if self.request_queue is None:
+            raise RuntimeError("request_queue is not initialized")
+        transport = self._correlated_rpc_client
+        if transport is None:
+            raise RuntimeError("correlated RPC client is not initialized")
+
+        rpc_id = uuid.uuid4().hex
+        msg = AbortRequestMessage(request_ids=request_ids, rpc_id=rpc_id)
+
+        def _wait() -> AbortResultMessage:
+            result_msg = transport.execute(
+                ("abort", rpc_id),
+                msg,
+                timeout=timeout,
+                timeout_message=f"abort timed out after {timeout} seconds",
+                block_on_submit=True,
+            )
+            if not isinstance(result_msg, AbortResultMessage):
+                raise RuntimeError(f"unexpected abort result type: {type(result_msg).__name__}")
+            return result_msg
+
+        loop = asyncio.get_running_loop()
+        result_msg = await loop.run_in_executor(None, _wait)
+        if not result_msg.success:
+            raise RuntimeError(result_msg.error or "abort failed")
 
     def submit_interaction(
         self,
@@ -1811,6 +1966,12 @@ class AsyncOmniEngine:
                     q.close()
             except Exception:
                 pass
+
+        if self._output_drain_executor is not None:
+            # Any in-flight blocking get bails out within its ≤1 s timeout
+            # (or immediately via the queue close above), so don't wait.
+            self._output_drain_executor.shutdown(wait=False)
+            self._output_drain_executor = None
 
         if hasattr(self, "_runtime") and self._runtime is not None and orchestrator_stopped:
             try:

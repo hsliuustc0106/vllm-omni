@@ -67,6 +67,12 @@ Encoder categories are resolved from `OffloadPlan.encoder_component_types`
 first. A name-based fallback is retained for pipelines that predate
 `OffloadPlan`.
 
+For encoder-only gather tables that are too large to justify device residency,
+models may declare `encoder_host_resident_table_attrs`. The table lookup then
+runs on CPU and only its small output crosses to the target device. This is an
+explicit safety contract: do not declare tied embeddings or weights accessed
+directly outside the table module's forward.
+
 ## Model integration
 
 Transformer classes declare containers of executable blocks:
@@ -95,6 +101,7 @@ class MyPipeline(nn.Module):
     _offload_plan = OffloadPlan(
         encoder_component_types={"prompt_model": "text_encoder"},
         encoder_block_attrs={"prompt_model": ("encoder.layers",)},
+        encoder_host_resident_table_attrs={"prompt_model": ("shared",)},
         on_demand_component_paths=frozenset({"vae"}),
     )
 ```
