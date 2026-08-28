@@ -24,7 +24,7 @@ from .config import (
     parse_offload_components,
     resolve_offload_strategy,
 )
-from .offload_plan import OffloadPlan
+from .offload_plan import OffloadPlan, ResolvedOffloadPlan
 
 logger = init_logger(__name__)
 
@@ -255,6 +255,9 @@ class OffloadBackend(ABC):
     def __init__(self, config: OffloadConfig, device: torch.device):
         self.config = config
         self.device = device
+        # Bound centrally before enable(). J2/J3 will replace backend-local
+        # discovery with reads from this immutable topology artifact.
+        self.resolved_plan: ResolvedOffloadPlan | None = None
         self.enabled = False
 
     @abstractmethod

@@ -18,7 +18,19 @@ from .distributed_layerwise_backend import (
 )
 from .layerwise_backend import LayerWiseOffloadBackend
 from .module_residency import BoundedAllocatorCache, PinnedModuleStager
-from .offload_plan import OffloadPlan, get_offload_plan
+from .offload_plan import (
+    HostResidentTableSpec,
+    OffloadComponentSpec,
+    OffloadLegacySelection,
+    OffloadPhaseSpec,
+    OffloadPlan,
+    OffloadPlanSource,
+    OffloadSelectionMode,
+    OffloadWeightLayout,
+    ResolvedOffloadPlan,
+    get_offload_plan,
+)
+from .plan_resolver import resolve_offload_plan
 from .sequential_backend import (
     ModelLevelOffloadBackend,
     apply_sequential_offload,
@@ -40,6 +52,14 @@ __all__ = [
     "OffloadBackend",
     "OffloadConfig",
     "OffloadPlan",
+    "OffloadComponentSpec",
+    "OffloadPhaseSpec",
+    "OffloadLegacySelection",
+    "HostResidentTableSpec",
+    "OffloadPlanSource",
+    "OffloadSelectionMode",
+    "OffloadWeightLayout",
+    "ResolvedOffloadPlan",
     "OffloadStrategy",
     "SupportsModelCpuOffload",
     "LayerWiseOffloadBackend",
@@ -58,6 +78,7 @@ __all__ = [
     "OffloadStartupState",
     "take_offload_startup_state",
     "get_offload_plan",
+    "resolve_offload_plan",
     "get_blocks_attr_names",
     "get_blocks_from_dit",
     "set_blocks_attr_names",
@@ -165,6 +186,11 @@ def enable_offload_backend(
                 host_weight_plan=state.host_weight_plan if state is not None else None,
             )
             if backend is not None:
+                # Production backends share this base contract. Keeping the
+                # guard also preserves lightweight test doubles around the
+                # transactional startup boundary.
+                if isinstance(backend, OffloadBackend):
+                    backend.resolved_plan = resolve_offload_plan(model, backend.config)
                 logger.info("Enabling offloader backend: %s", backend.__class__.__name__)
                 backend.enable(model)
             elif state is not None:
