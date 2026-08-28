@@ -39,11 +39,13 @@ class OffloadPlan:
             model-declared avoids applying a consumer-GPU tuning knob to
             auxiliary or dual DiTs unintentionally.
         encoder_component_types: Maps encoder paths to public selector types
-            (text_encoder or image_encoder). This declaration is used before
-            the compatibility name heuristic.
-        encoder_block_attrs: Maps encoder paths to rank-local block-list paths.
-            These blocks are streamed with ordinary layerwise hooks, never
-            with the DiT AllGather group.
+            (currently text_encoder). This declaration is used before the
+            compatibility name heuristic.
+        encoder_block_attrs: Maps encoder paths to streamable block-list paths.
+        encoder_dlo_weight_replication: Encoder paths whose loader-produced
+            block tensors are identical across the DiT DLO group. Only these
+            encoders may use multi-rank AllGather transfer; this must not be
+            declared for encoder-TP shards.
         encoder_host_resident_table_attrs: Maps encoder paths to gather-only
             table paths that may remain on CPU while their lookup result is
             copied to the target device. This must be declared only when the
@@ -58,6 +60,7 @@ class OffloadPlan:
     resident_dit_paths: frozenset[str] = field(default_factory=frozenset)
     encoder_component_types: dict[str, str] = field(default_factory=dict)
     encoder_block_attrs: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    encoder_dlo_weight_replication: frozenset[str] = field(default_factory=frozenset)
     encoder_host_resident_table_attrs: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 

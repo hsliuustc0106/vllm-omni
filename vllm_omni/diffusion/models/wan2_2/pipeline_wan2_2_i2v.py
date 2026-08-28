@@ -196,12 +196,11 @@ class Wan22I2VPipeline(
     _offload_plan = OffloadPlan(
         encoder_component_types={
             "text_encoder": "text_encoder",
-            "image_encoder": "image_encoder",
         },
         encoder_block_attrs={
             "text_encoder": ("encoder.block",),
-            "image_encoder": ("vision_model.encoder.layers",),
         },
+        encoder_dlo_weight_replication=frozenset({"text_encoder"}),
         encoder_host_resident_table_attrs={"text_encoder": ("shared",)},
     )
 

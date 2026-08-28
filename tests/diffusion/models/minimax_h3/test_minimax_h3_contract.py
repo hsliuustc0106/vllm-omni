@@ -1228,8 +1228,8 @@ def test_model_offload_uses_hooked_text_encoder_call():
     pipeline.text_encoder.load_to_device.assert_not_called()
 
 
-@pytest.mark.parametrize("components", [None, "default", "all"])
-def test_layerwise_default_group_releases_text_encoder(components):
+@pytest.mark.parametrize("components", ["text_encoder", "all"])
+def test_layerwise_encoder_selection_releases_text_encoder(components):
     from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
 
     pipeline = object.__new__(MiniMaxH3Pipeline)
@@ -1273,8 +1273,8 @@ def test_layerwise_dit_only_keeps_text_encoder_resident():
     pipeline.text_encoder.offload_to_cpu.assert_not_called()
 
 
-@pytest.mark.parametrize("components", [None, "all"])
-def test_distributed_layerwise_all_releases_text_encoder(components):
+@pytest.mark.parametrize("components", ["text_encoder", "all"])
+def test_distributed_layerwise_encoder_selection_releases_text_encoder(components):
     from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
 
     pipeline = object.__new__(MiniMaxH3Pipeline)
@@ -1296,7 +1296,7 @@ def test_distributed_layerwise_all_releases_text_encoder(components):
     pipeline.text_encoder.offload_to_cpu.assert_called_once_with()
 
 
-def test_standalone_audio_conditions_stage_audio_vae(monkeypatch):
+def test_standalone_audio_conditions_keep_audio_vae_resident(monkeypatch):
     from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
     from vllm_omni.diffusion.models.minimax_h3 import (
         pipeline_minimax_h3 as pipeline_module,
@@ -1308,7 +1308,7 @@ def test_standalone_audio_conditions_stage_audio_vae(monkeypatch):
     pipeline.od_config = SimpleNamespace(
         enable_layerwise_offload=True,
         enable_distributed_layerwise_offload=False,
-        layerwise_offload_components="vae",
+        layerwise_offload_components="all",
     )
     pipeline.audio_vae = Mock()
     pipeline.audio_vae.encode_waveform.side_effect = [
@@ -1319,13 +1319,13 @@ def test_standalone_audio_conditions_stage_audio_vae(monkeypatch):
 
     rows, lengths = pipeline._encode_audio_conditions_resident([(torch.ones(8), 16_000), (torch.ones(12), 24_000)])
 
-    pipeline.audio_vae.load_to_device.assert_called_once_with()
-    pipeline.audio_vae.offload_to_cpu.assert_called_once_with()
+    pipeline.audio_vae.load_to_device.assert_not_called()
+    pipeline.audio_vae.offload_to_cpu.assert_not_called()
     assert rows.shape == (3, 3)
     assert lengths == [4, 5]
 
 
-def test_distributed_layerwise_all_stages_vae_component():
+def test_distributed_layerwise_all_keeps_vae_component_resident():
     from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
 
     pipeline = object.__new__(MiniMaxH3Pipeline)
@@ -1338,10 +1338,10 @@ def test_distributed_layerwise_all_stages_vae_component():
     component = Mock()
 
     with pipeline._component_on_device(component):
-        component.load_to_device.assert_called_once_with()
+        component.load_to_device.assert_not_called()
         component.offload_to_cpu.assert_not_called()
 
-    component.offload_to_cpu.assert_called_once_with()
+    component.offload_to_cpu.assert_not_called()
 
 
 def test_dit_encoder_selection_keeps_vae_resident():

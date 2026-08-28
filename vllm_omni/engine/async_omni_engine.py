@@ -1064,6 +1064,7 @@ class AsyncOmniEngine:
             "enable_layerwise_offload": kwargs.get("enable_layerwise_offload", False),
             "enable_distributed_layerwise_offload": kwargs.get("enable_distributed_layerwise_offload", False),
             "layerwise_offload_components": kwargs.get("layerwise_offload_components", None),
+            "dlo_transfer": kwargs.get("dlo_transfer", None),
             "dlo_use_allgather": kwargs.get("dlo_use_allgather", True),
             "dlo_resident_layers": kwargs.get("dlo_resident_layers", 0),
             "host_weight_runtime_mode": kwargs.get("host_weight_runtime_mode", "disabled"),

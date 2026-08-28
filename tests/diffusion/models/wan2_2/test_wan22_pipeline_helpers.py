@@ -23,6 +23,7 @@ def test_t2v_pipeline_declares_text_encoder_offload_blocks() -> None:
 
     assert plan.encoder_component_types == {"text_encoder": "text_encoder"}
     assert plan.encoder_block_attrs == {"text_encoder": ("encoder.block",)}
+    assert plan.encoder_dlo_weight_replication == frozenset({"text_encoder"})
     assert plan.encoder_host_resident_table_attrs == {"text_encoder": ("shared",)}
     assert plan.on_demand_component_paths == frozenset()
 

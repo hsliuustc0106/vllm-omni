@@ -321,7 +321,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Comma-separated component groups to offload. Unset selects dit; "
-            "default selects text_encoder,image_encoder,vae; all selects every group."
+            "Supported values are dit,text_encoder,all; unset preserves DiT-only offload."
         ),
     )
     parser.add_argument(

@@ -697,6 +697,7 @@ class _DiffusionConfigProjection:
     enable_layerwise_offload: bool = False
     enable_distributed_layerwise_offload: bool = False
     layerwise_offload_components: str | list[str] | None = None
+    dlo_transfer: str | dict[str, str] | None = None
     dlo_use_allgather: bool = True
     dlo_resident_layers: int = Field(default=0, ge=0)
     host_weight_runtime_mode: Literal["disabled", "preferred", "required"] = "disabled"
@@ -842,10 +843,21 @@ class _DiffusionConfigProjection:
             mode=self.host_weight_runtime_mode,
             root=self.host_weight_runtime_root,
         )
+        from vllm_omni.diffusion.offloader.config import (
+            DIT_COMPONENT,
+            component_uses_allgather,
+            selected_dlo_components,
+        )
+
+        selected_components = selected_dlo_components(self)
+
         self.dlo_host_registration_limit_gib = validate_dlo_host_registration_options(
             limit_gib=self.dlo_host_registration_limit_gib,
             enable_dlo=self.enable_distributed_layerwise_offload,
-            use_allgather=self.dlo_use_allgather,
+            use_allgather=(
+                DIT_COMPONENT not in selected_components
+                or component_uses_allgather(self, DIT_COMPONENT)
+            ),
             hwr_mode=self.host_weight_runtime_mode,
         )
 

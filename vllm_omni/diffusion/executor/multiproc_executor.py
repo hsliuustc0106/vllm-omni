@@ -23,6 +23,7 @@ from vllm.v1.executor.multiproc_executor import set_multiprocessing_worker_envs
 from vllm_omni.diffusion.data import SHUTDOWN_MESSAGE, AsyncDiffusionOutput, AsyncOutputKind, DiffusionOutput
 from vllm_omni.diffusion.executor.abstract import DiffusionExecutor
 from vllm_omni.diffusion.ipc import DIFFUSION_RPC_RESULT_ENVELOPE, unpack_diffusion_output_shm
+from vllm_omni.diffusion.offloader.config import any_selected_component_uses_allgather
 from vllm_omni.diffusion.sched.request_scheduler import build_request_batch_sampling_params_key
 from vllm_omni.diffusion.utils.future_utils import try_set_exception, try_set_result
 from vllm_omni.diffusion.worker import WorkerProc
@@ -473,8 +474,7 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
         # responses and match by dp_rank.
         if (
             len(new_reqs) > 1
-            and getattr(self.od_config, "enable_distributed_layerwise_offload", False)
-            and getattr(self.od_config, "dlo_use_allgather", True)
+            and any_selected_component_uses_allgather(self.od_config)
         ):
             # Reuse the request scheduler's complete compatibility key. DLO
             # AllGather requires every DP rank to execute the same collective
@@ -607,8 +607,7 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
         dp_size = getattr(parallel_config, "data_parallel_size", 1)
         if (
             dp_size > 1
-            and getattr(self.od_config, "enable_distributed_layerwise_offload", False)
-            and getattr(self.od_config, "dlo_use_allgather", True)
+            and any_selected_component_uses_allgather(self.od_config)
         ):
             # DLO DP uses one independent request per DP replica.  It is not a
             # fused pipeline request batch, so models such as MiniMax-H3 do not

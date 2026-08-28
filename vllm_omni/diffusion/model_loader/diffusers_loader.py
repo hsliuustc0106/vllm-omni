@@ -41,6 +41,11 @@ from vllm_omni.diffusion.model_loader.host_weight_plan import (
     has_online_quantization,
 )
 from vllm_omni.diffusion.models.diffusers_adapter.pipeline_diffusers_adapter import DiffusersAdapterPipeline
+from vllm_omni.diffusion.offloader.config import (
+    DIT_COMPONENT,
+    component_uses_allgather,
+    selected_dlo_components,
+)
 from vllm_omni.diffusion.offloader.module_collector import ModuleDiscovery
 from vllm_omni.diffusion.registry import initialize_model
 from vllm_omni.model_executor.model_loader.weight_utils import download_weights_from_hf_specific
@@ -511,8 +516,11 @@ class DiffusersPipelineLoader(HWRLoaderMixin):
             else:
                 model = self._init_from_load_format(load_format, target_device, custom_pipeline_name, is_hsdp=False)
 
-                _dist_offload = getattr(self.od_config, "enable_distributed_layerwise_offload", False)
-                _use_ag = getattr(self.od_config, "dlo_use_allgather", True)
+                _dist_offload = bool(
+                    getattr(self.od_config, "enable_distributed_layerwise_offload", False)
+                    and DIT_COMPONENT in selected_dlo_components(self.od_config)
+                )
+                _use_ag = component_uses_allgather(self.od_config, DIT_COMPONENT)
                 _has_online_quant = self._has_online_quant(model)
                 _tp_size = int(getattr(self.parallel_config, "tensor_parallel_size", 1))
                 _use_hsdp = bool(getattr(self.parallel_config, "use_hsdp", False))

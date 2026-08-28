@@ -31,17 +31,12 @@ def test_wan22_i2v_postprocess_honors_request_output_type() -> None:
     assert output is video
 
 
-def test_i2v_pipeline_declares_text_and_image_encoder_offload_blocks() -> None:
+def test_i2v_pipeline_declares_text_encoder_offload_blocks() -> None:
     plan = Wan22I2VPipeline._offload_plan
 
-    assert plan.encoder_component_types == {
-        "text_encoder": "text_encoder",
-        "image_encoder": "image_encoder",
-    }
-    assert plan.encoder_block_attrs == {
-        "text_encoder": ("encoder.block",),
-        "image_encoder": ("vision_model.encoder.layers",),
-    }
+    assert plan.encoder_component_types == {"text_encoder": "text_encoder"}
+    assert plan.encoder_block_attrs == {"text_encoder": ("encoder.block",)}
+    assert plan.encoder_dlo_weight_replication == frozenset({"text_encoder"})
     assert plan.encoder_host_resident_table_attrs == {"text_encoder": ("shared",)}
     assert plan.on_demand_component_paths == frozenset()
 

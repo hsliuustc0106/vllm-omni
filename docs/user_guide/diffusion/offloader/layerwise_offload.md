@@ -18,10 +18,9 @@ stream.
 | ... | ... | ... | ... |
 | last block | Prefetch block 0 | Compute last block | Free last block |
 
-Selected, plan-declared encoder blocks can use the same rank-local streaming
-mechanism. Selected encoders or VAEs with a declared on-demand lifecycle are
-staged between pipeline phases. Undeclared auxiliary modules and non-block DiT
-modules remain device resident.
+Selected, plan-declared text-encoder blocks can use the same rank-local
+streaming mechanism. Image encoders, VAEs, and non-block DiT modules remain
+device resident.
 
 ## Usage
 
@@ -41,15 +40,10 @@ vllm serve Wan-AI/Wan2.2-T2V-A14B-Diffusers \
 
 ## Component selection
 
-Use `--layerwise-offload-components` with any comma-separated subset of
-`dit,text_encoder,image_encoder,vae`:
+Use `--layerwise-offload-components` with `dit`, `text_encoder`, or both:
 
 - Omitting the option selects `dit`, preserving the existing DiT-only behavior.
-- `all` selects all four categories. A category is offloaded only when the model
-  declares a safe block topology or on-demand lifecycle; otherwise that module
-  remains resident.
-- `default` selects `text_encoder,image_encoder,vae` and leaves the DiT
-  resident. It is valid for ordinary layerwise offload only.
+- `all` selects both supported categories.
 - An explicit subset such as `dit,text_encoder` controls only those categories.
 
 ```bash
@@ -97,12 +91,10 @@ from vllm_omni.diffusion.offloader import OffloadPlan
 
 class MyPipeline(nn.Module):
     _encoder_modules = ["prompt_model"]
-    _vae_modules = ["vae"]
     _offload_plan = OffloadPlan(
         encoder_component_types={"prompt_model": "text_encoder"},
         encoder_block_attrs={"prompt_model": ("encoder.layers",)},
         encoder_host_resident_table_attrs={"prompt_model": ("shared",)},
-        on_demand_component_paths=frozenset({"vae"}),
     )
 ```
 
@@ -112,7 +104,8 @@ offload consume the same `OffloadPlan` metadata.
 
 ## Limitations
 
-- Single device only.
+- The ordinary backend uses rank-local transfer. For multi-device shard +
+  AllGather transport, use distributed layerwise offload.
 - Setup consolidates and pins block parameters, increasing cold-start time.
 - Performance depends on block compute time and host-to-device bandwidth;
   lightweight blocks may not hide transfers.

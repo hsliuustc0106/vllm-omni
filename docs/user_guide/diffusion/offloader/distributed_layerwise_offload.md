@@ -27,21 +27,26 @@ parallel ranks may process different requests concurrently.
 ## Usage
 
 ```bash
-# Four ranks with sharded host weights and AllGather
-vllm serve /path/to/model --omni \
+# Four SP ranks; Wan declares replicated text-encoder weights, so both
+# selected components can use AllGather safely.
+vllm serve Wan-AI/Wan2.2-T2V-A14B-Diffusers --omni \
   --enable-distributed-layerwise-offload \
-  --layerwise-offload-components dit,text_encoder,vae \
-  --data-parallel-size 4
+  --layerwise-offload-components dit,text_encoder \
+  --dlo-transfer allgather \
+  --usp 4
 
-# Standard-loader rank-local weights, without DLO AllGather
+# Mix transfers independently: sharded DiT, loader-produced encoder layout
 vllm serve /path/to/model --omni \
   --enable-distributed-layerwise-offload \
-  --data-parallel-size 4 \
-  --dlo-no-use-allgather
+  --layerwise-offload-components dit,text_encoder \
+  --dlo-transfer dit=allgather,text_encoder=rank-local \
+  --usp 4
 
-# Sequence parallel deployment
+# Standard-loader rank-local weights for both components
 vllm serve /path/to/model --omni \
   --enable-distributed-layerwise-offload \
+  --layerwise-offload-components all \
+  --dlo-transfer rank-local \
   --usp 4
 ```
 
@@ -51,7 +56,11 @@ from vllm_omni import Omni
 omni = Omni(
     model="/path/to/model",
     enable_distributed_layerwise_offload=True,
-    dlo_use_allgather=True,
+    layerwise_offload_components=["dit", "text_encoder"],
+    dlo_transfer={
+        "dit": "allgather",
+        "text_encoder": "rank-local",
+    },
 )
 ```
 
@@ -60,14 +69,33 @@ omni = Omni(
 | Flag | Meaning | Default |
 | --- | --- | --- |
 | `--enable-distributed-layerwise-offload` | Enable DLO | `false` |
-| `--layerwise-offload-components LIST` | Select DiT, encoder, and VAE categories; DLO requires `dit` | `dit` |
+| `--layerwise-offload-components LIST` | Select `dit`, `text_encoder`, or `all` | `dit` |
+| `--dlo-transfer MODE_OR_MAP` | `allgather`, `rank-local`, or a component map such as `dit=allgather,text_encoder=rank-local` | `allgather` |
 | `--data-parallel-size N` | DP ranks and AllGather weight-sharding group | `1` |
-| `--dlo-use-allgather` | Shard host weights and reconstruct with AllGather | `true` |
-| `--dlo-no-use-allgather` | Stream complete rank-local blocks without a DLO weight collective | `false` |
-| `--dlo-resident-layers N` | Keep N leading main-DiT blocks on device; requires no-AllGather and model-declared resident paths | `0` |
+| `--dlo-use-allgather` | Legacy global alias for `--dlo-transfer allgather` | `true` |
+| `--dlo-no-use-allgather` | Legacy global alias for `--dlo-transfer rank-local` | `false` |
+| `--dlo-resident-layers N` | Keep N leading main-DiT blocks on device; requires DiT `rank-local` and model-declared resident paths | `0` |
 | `--host-weight-runtime-mode {disabled,preferred,required}` | HWR policy: no interaction, populate on a miss, or require an exact hit | `disabled` |
 | `--host-weight-runtime-root PATH` | Writable node-local HWR store shared by workers in one storage domain; required for `preferred` and `required` | unset |
 | `--dlo-host-registration-limit-gib N` | Optional per-worker ceiling for registering an HWR mmap; zero adds no ceiling | `0` |
+
+## Component and transfer matrix
+
+| Component | `allgather` | `rank-local` |
+| --- | --- | --- |
+| DiT | Shard each loader-visible block across the DLO DP group, or the SP group when DP is one | Stream each rank's complete loader-produced block |
+| Text encoder | Same shard + AllGather path when the model declares identical encoder weights across the DLO group | Stream each rank's complete encoder block, including encoder-TP shards |
+
+The text encoder's compute group and weight-transfer group are separate
+concepts. An encoder TP group owns different parameter shards, so it is not a
+valid AllGather offload group. Models opt in through
+`OffloadPlan.encoder_dlo_weight_replication`; otherwise multi-rank encoder
+AllGather fails at startup with guidance to use `rank-local`. This makes SP
+AllGather available to replicated encoders without silently corrupting an
+encoder-TP layout.
+
+`dlo_resident_layers` remains a DiT-only setting and currently requires the
+DiT transfer to be `rank-local`.
 
 ## Host-weight loading
 
@@ -244,23 +272,23 @@ from vllm_omni.diffusion.offloader import OffloadPlan
 class MyPipeline(nn.Module):
     _dit_modules = ["transformer"]
     _encoder_modules = ["prompt_model"]
-    _vae_modules = ["vae"]
     _offload_plan = OffloadPlan(
         block_attrs={"transformer": ("blocks",)},
         offload_submodules={"context_encoder": "layers"},
         encoder_component_types={"prompt_model": "text_encoder"},
         encoder_block_attrs={"prompt_model": ("encoder.layers",)},
+        encoder_dlo_weight_replication=frozenset({"prompt_model"}),
         encoder_host_resident_table_attrs={"prompt_model": ("shared",)},
-        on_demand_component_paths=frozenset({"prompt_model", "vae"}),
+        on_demand_component_paths=frozenset({"prompt_model"}),
     )
 ```
 
 `encoder_component_types` maps arbitrary encoder paths to the public
-`text_encoder` or `image_encoder` selectors. Encoder blocks remain rank-local
-and never join the DiT AllGather group. On-demand components are loaded and
-offloaded by their pipeline phase. Explicitly declared gather-only encoder
-tables may remain on CPU while only lookup results move to the target device;
-tied or directly accessed weights must not use that path.
+`text_encoder` selector. `encoder_dlo_weight_replication` is the explicit
+safety declaration for reusing the DiT DLO group. On-demand encoder non-block
+state is loaded and offloaded by its pipeline phase. Explicitly declared
+gather-only encoder tables may remain on CPU while only lookup results move to
+the target device; tied or directly accessed weights must not use that path.
 
 When no plan exists, DiT discovery falls back to
 `_layerwise_offload_blocks_attrs` and then heuristic attribute lookup;
@@ -288,7 +316,7 @@ must enter each collective.
   complete FP8 model in host memory before DLO retains only its shard. Other
   online quantization methods require no-AllGather until their runtime layouts
   are validated.
-- Resident leading layers require `--dlo-no-use-allgather` and a model
+- Resident leading layers require DiT `rank-local` transfer and a model
   `OffloadPlan` that declares eligible `resident_dit_paths`.
 - DP concurrency requires an explicit, identical inference-step count.
 

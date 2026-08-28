@@ -787,9 +787,12 @@ class OmniDiffusionConfig:
     enable_layerwise_offload: bool = False
     # Distributed layer-wise offloading with H2D + AllGather overlap (RFC-1)
     enable_distributed_layerwise_offload: bool = False
-    # Optional component filter: dit,text_encoder,image_encoder,vae.
+    # Optional component filter: dit,text_encoder,all.
     # None preserves the existing DiT-only behavior.
     layerwise_offload_components: str | list[str] | None = None
+    # DLO transfer mode. A scalar applies to every selected component; a
+    # component map allows independent DiT/text-encoder selection.
+    dlo_transfer: str | dict[str, str] | None = None
     # If True: shard weights 1/dp_size + AllGather (saves CPU memory, requires
     # concurrent requests in DP mode). If False: each rank streams the standard
     # loader's rank-local tensors (including TP-local shards) via H2D only.
@@ -1186,10 +1189,24 @@ class OmniDiffusionConfig:
             mode=self.host_weight_runtime_mode,
             root=self.host_weight_runtime_root,
         )
+        from vllm_omni.diffusion.offloader.config import (
+            DIT_COMPONENT,
+            component_uses_allgather,
+            selected_dlo_components,
+        )
+
+        selected_components = selected_dlo_components(self)
+
         self.dlo_host_registration_limit_gib = validate_dlo_host_registration_options(
             limit_gib=self.dlo_host_registration_limit_gib,
             enable_dlo=self.enable_distributed_layerwise_offload,
-            use_allgather=self.dlo_use_allgather,
+            # Registration is a DiT host-storage optimization. Treat an
+            # encoder-only selection as ineligible rather than accepting a
+            # budget that no loader path will consume.
+            use_allgather=(
+                DIT_COMPONENT not in selected_components
+                or component_uses_allgather(self, DIT_COMPONENT)
+            ),
             hwr_mode=self.host_weight_runtime_mode,
         )
 

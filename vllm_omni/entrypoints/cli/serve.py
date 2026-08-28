@@ -717,11 +717,18 @@ class OmniServeCommand(CLISubcommand):
             type=str,
             default=None,
             help="Comma-separated model components within the diffusion stage "
-            "controlled by layerwise offload: "
-            "dit,text_encoder,image_encoder,vae,all,default. Omitting the "
-            "option preserves DiT-only offload; all selects every category; "
-            "default selects text_encoder,image_encoder,vae. Distributed "
-            "layerwise offload requires the selection to include dit.",
+            "controlled by layerwise offload: dit,text_encoder,all. Omitting "
+            "the option preserves DiT-only offload; all selects both supported "
+            "components.",
+        )
+        omni_config_group.add_argument(
+            "--dlo-transfer",
+            type=str,
+            default=None,
+            help="Distributed-layerwise transfer mode. Use allgather or rank-local "
+            "for every selected component, or a component map such as "
+            "dit=allgather,text_encoder=rank-local. Default: allgather. The "
+            "legacy --dlo-no-use-allgather flag remains supported.",
         )
         omni_config_group.add_argument(
             "--dlo-use-allgather",

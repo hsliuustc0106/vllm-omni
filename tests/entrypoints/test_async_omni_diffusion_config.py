@@ -344,9 +344,10 @@ def test_serve_cli_forwards_distributed_offload_residency():
             "MiniMaxAI/MiniMax-H3",
             "--omni",
             "--enable-distributed-layerwise-offload",
-            "--dlo-no-use-allgather",
             "--layerwise-offload-components",
             "dit,text_encoder",
+            "--dlo-transfer",
+            "dit=rank-local,text_encoder=rank-local",
             "--dlo-resident-layers",
             "20",
         ]
@@ -358,11 +359,13 @@ def test_serve_cli_forwards_distributed_offload_residency():
 
     assert args.enable_distributed_layerwise_offload is True
     assert args.layerwise_offload_components == "dit,text_encoder"
-    assert args.dlo_use_allgather is False
+    assert args.dlo_transfer == "dit=rank-local,text_encoder=rank-local"
+    assert args.dlo_use_allgather is True
     assert args.dlo_resident_layers == 20
     assert engine_args["enable_distributed_layerwise_offload"] is True
     assert engine_args["layerwise_offload_components"] == "dit,text_encoder"
-    assert engine_args["dlo_use_allgather"] is False
+    assert engine_args["dlo_transfer"] == "dit=rank-local,text_encoder=rank-local"
+    assert engine_args["dlo_use_allgather"] is True
     assert engine_args["dlo_resident_layers"] == 20
 
 

@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm_omni.diffusion.hooks import HookRegistry, ModelHook
 from vllm_omni.platforms import current_omni_platform
 
-from .base import DIT_COMPONENT, VAE_COMPONENT, OffloadBackend, OffloadConfig
+from .base import DIT_COMPONENT, OffloadBackend, OffloadConfig
 from .module_collector import ModuleDiscovery
 from .offload_plan import OffloadPlan, get_offload_plan
 
@@ -535,9 +535,6 @@ class LayerWiseOffloadBackend(OffloadBackend):
             for enc, enc_name in zip(modules.encoders, modules.encoder_names):
                 if self.config.offloads_encoder(enc_name, plan) and enc_name in plan.on_demand_component_paths:
                     validate_on_demand_component(enc, enc_name)
-            for vae, vae_name in zip(modules.vaes, modules.vae_names):
-                if self.config.offloads(VAE_COMPONENT) and vae_name in plan.on_demand_component_paths:
-                    validate_on_demand_component(vae, vae_name)
 
         for enc, enc_name in zip(modules.encoders, modules.encoder_names):
             selected = self.config.offloads_encoder(enc_name, plan)
@@ -559,15 +556,8 @@ class LayerWiseOffloadBackend(OffloadBackend):
                 stage_on_demand=bool(selected and plan is not None and enc_name in plan.on_demand_component_paths),
             )
 
-        for vae, vae_name in zip(modules.vaes, modules.vae_names):
-            selected = self.config.offloads(VAE_COMPONENT)
-            self._prepare_component(
-                vae,
-                vae_name,
-                selected=selected,
-                blockwise=False,
-                stage_on_demand=bool(selected and plan is not None and vae_name in plan.on_demand_component_paths),
-            )
+        for vae in modules.vaes:
+            vae.to(self.device)
 
         # Move resident modules to GPU (small modules needed every forward)
         for name, module in zip(modules.resident_names, modules.resident_modules):

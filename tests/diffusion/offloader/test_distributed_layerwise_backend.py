@@ -1409,6 +1409,7 @@ class TestOffloadPlan:
         assert plan.block_attrs == {}
         assert plan.offload_submodules == {}
         assert plan.resident_dit_paths == frozenset()
+        assert plan.encoder_dlo_weight_replication == frozenset()
 
     def test_offload_plan_is_frozen(self):
         """OffloadPlan should be immutable (frozen=True)."""
@@ -1870,8 +1871,8 @@ class TestConfigValidation:
             (2, 1, 1, True, 2),
             (1, 4, 1, True, 4),
             (2, 2, 2, True, 2),
-            (2, 2, 2, False, 1),
-            (1, 4, 2, False, 1),
+            (2, 2, 2, False, 2),
+            (1, 4, 2, False, 4),
         ],
     )
     def test_dlo_group_selection_covers_dp_sp_tp_matrix(
@@ -2045,7 +2046,7 @@ class TestConfigValidation:
             model = "/fake/path"
 
         config = OffloadConfig.from_od_config(FakeODConfig())
-        assert config.dp_size == 1  # forced to 1 when no AllGather
+        assert config.dp_size == 2  # topology is retained; the hook selects group size 1
         assert config.dlo_resident_layers == 20
 
     def test_resident_layers_with_allgather_rejected(self):
@@ -2064,7 +2065,7 @@ class TestConfigValidation:
             parallel_config = FakePC()
             model = "/fake/path"
 
-        with pytest.raises(ValueError, match="requires --dlo-no-use-allgather"):
+        with pytest.raises(ValueError, match="requires the DiT DLO transfer to be rank-local"):
             OffloadConfig.from_od_config(FakeODConfig())
 
     def test_num_inference_steps_none_rejected(self):
@@ -2376,7 +2377,7 @@ class _DistributedComponentPipeline(nn.Module):
     _offload_plan = OffloadPlan(
         encoder_component_types={"text_encoder": "text_encoder"},
         encoder_block_attrs={"text_encoder": ("vision.blocks", "text_model.layers")},
-        on_demand_component_paths=frozenset({"text_encoder", "vae"}),
+        on_demand_component_paths=frozenset({"text_encoder"}),
     )
 
     def __init__(self):
@@ -2400,6 +2401,7 @@ class _GenericDistributedEncoderPipeline(nn.Module):
     _offload_plan = OffloadPlan(
         encoder_component_types={"text_encoder": "text_encoder"},
         encoder_block_attrs={"text_encoder": ("encoder.block",)},
+        encoder_dlo_weight_replication=frozenset({"text_encoder"}),
     )
 
     def __init__(self):
@@ -2409,7 +2411,7 @@ class _GenericDistributedEncoderPipeline(nn.Module):
 
 
 class TestDistributedComponentSelection:
-    def test_all_streams_encoder_and_stages_vae(self, patched_offload_runtime):
+    def test_all_streams_encoder_and_keeps_vae_resident(self, patched_offload_runtime):
         pipeline = _DistributedComponentPipeline()
         backend = DistributedLayerwiseOffloadBackend(
             OffloadConfig(
@@ -2425,8 +2427,11 @@ class TestDistributedComponentSelection:
 
         assert pipeline.text_encoder._omni_layerwise_enabled
         assert len(pipeline.text_encoder._omni_layerwise_hooks) == 4
+        # The pipeline-owned stage lifecycle releases the encoder's non-block
+        # state after DLO has installed blockwise hooks.
         assert pipeline.text_encoder.offload_calls == 1
-        assert pipeline.vae.offload_calls == 1
+        assert pipeline.vae.offload_calls == 0
+        assert pipeline.vae.to_calls == 1
 
         backend.disable()
 
@@ -2435,12 +2440,7 @@ class TestDistributedComponentSelection:
             *pipeline.text_encoder.vision.blocks,
             *pipeline.text_encoder.text_model.layers,
         ]
-        assert all(block._hook_registry.get_hook("layerwise_offload") is None for block in encoder_blocks)
-
-        backend.enable(pipeline)
-        assert pipeline.text_encoder._omni_layerwise_enabled
-        assert len(pipeline.text_encoder._omni_layerwise_hooks) == 4
-        backend.disable()
+        assert all(block._hook_registry.get_hook("distributed_layerwise_offload") is None for block in encoder_blocks)
 
     def test_dit_only_keeps_encoder_and_vae_resident(self, patched_offload_runtime):
         pipeline = _DistributedComponentPipeline()
@@ -2502,11 +2502,72 @@ class TestDistributedComponentSelection:
 
         blocks = pipeline.text_encoder.encoder.block
         assert pipeline.text_encoder._omni_layerwise_enabled
-        assert all(block._hook_registry.get_hook("layerwise_offload") is not None for block in blocks)
+        assert all(block._hook_registry.get_hook("distributed_layerwise_offload") is not None for block in blocks)
         assert pipeline.text_encoder.final_norm.weight.numel() == 4
 
         backend.disable()
 
         assert not pipeline.text_encoder._omni_layerwise_enabled
-        assert all(block._hook_registry.get_hook("layerwise_offload") is None for block in blocks)
-        assert all(block.weight.numel() == 100 for block in blocks)
+        assert all(block._hook_registry.get_hook("distributed_layerwise_offload") is None for block in blocks)
+
+    def test_dit_and_encoder_choose_transfer_independently(self, patched_offload_runtime, monkeypatch):
+        pipeline = _GenericDistributedEncoderPipeline()
+        backend = DistributedLayerwiseOffloadBackend(
+            OffloadConfig(
+                strategy=OffloadStrategy.DISTRIBUTED_LAYER_WISE,
+                pin_cpu_memory=False,
+                dp_size=2,
+                components=frozenset({"dit", "text_encoder"}),
+                dlo_transfers={"dit": "rank-local", "text_encoder": "allgather"},
+            ),
+            torch.device("cpu"),
+        )
+        backend.dp_group = object()
+        monkeypatch.setattr(
+            torch.distributed,
+            "all_gather_into_tensor",
+            lambda output, local, group: output.copy_(local.repeat(2)),
+        )
+
+        backend.enable(pipeline)
+
+        encoder_hook = pipeline.text_encoder.encoder.block[0]._hook_registry.get_hook(
+            "distributed_layerwise_offload"
+        )
+        dit_hook = pipeline.transformer.blocks[0]._hook_registry.get_hook("distributed_layerwise_offload")
+        assert encoder_hook.dp_size == 2
+        assert dit_hook.dp_size == 1
+
+        backend.disable()
+
+    def test_encoder_allgather_rejects_undeclared_replication(self, patched_offload_runtime):
+        pipeline = _DistributedComponentPipeline()
+        backend = DistributedLayerwiseOffloadBackend(
+            OffloadConfig(
+                strategy=OffloadStrategy.DISTRIBUTED_LAYER_WISE,
+                pin_cpu_memory=False,
+                dp_size=2,
+                components=frozenset({"text_encoder"}),
+                dlo_transfers={"text_encoder": "allgather"},
+            ),
+            torch.device("cpu"),
+        )
+        backend.dp_group = object()
+
+        with pytest.raises(ValueError, match="not declared replicated"):
+            backend.enable(pipeline)
+
+    def test_encoder_only_requires_streamable_offload_plan(self, patched_offload_runtime):
+        pipeline = _LegacyDistributedComponentPipeline()
+        backend = DistributedLayerwiseOffloadBackend(
+            OffloadConfig(
+                strategy=OffloadStrategy.DISTRIBUTED_LAYER_WISE,
+                pin_cpu_memory=False,
+                components=frozenset({"text_encoder"}),
+                dlo_transfers={"text_encoder": "rank-local"},
+            ),
+            torch.device("cpu"),
+        )
+
+        with pytest.raises(ValueError, match="None of the selected distributed layerwise offload components"):
+            backend.enable(pipeline)

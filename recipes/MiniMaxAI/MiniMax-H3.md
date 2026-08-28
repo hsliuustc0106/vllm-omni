@@ -121,7 +121,7 @@ host-RAM budget above.
 Use ordinary layerwise offload when one GPU cannot keep the Qwen3-VL encoder
 and DiT resident together. The component list below streams the active DiT,
 the Qwen vision blocks, and the first 50 Qwen text layers. Encoder blocks stay
-rank-local; the video/audio VAEs are staged only around encode/decode.
+rank-local; the video/audio VAEs remain resident.
 
 ```bash
 export MODEL=MiniMaxAI/MiniMax-H3
@@ -138,7 +138,7 @@ vllm serve "${MODEL}" \
   --task-type fl2va \
   --num-gpus 1 \
   --enable-layerwise-offload \
-  --layerwise-offload-components dit,text_encoder,vae \
+  --layerwise-offload-components dit,text_encoder \
   --enforce-eager \
   --diffusion-attention-backend FLASH_ATTN
 ```
@@ -192,8 +192,8 @@ vllm serve "${MODEL}" \
   --vae-parallel-mode tile \
   --vae-use-tiling \
   --enable-distributed-layerwise-offload \
-  --layerwise-offload-components dit,text_encoder,vae \
-  --dlo-no-use-allgather \
+  --layerwise-offload-components dit,text_encoder \
+  --dlo-transfer rank-local \
   --dlo-resident-layers 20 \
   --enforce-eager \
   --diffusion-attention-backend CUDNN_ATTN
@@ -207,7 +207,7 @@ Use the profile that matches the per-GPU memory capacity:
 | `rtx4090` | 2 x 24 GB | 1024x576 | 12 | cuDNN attention | eager | Capacity-proxy starting point |
 
 This topology uses all available parallel capacity: TP2 shards both the DiT
-and text encoder, `--dlo-no-use-allgather` streams each rank's local TP shard
+and text encoder, `--dlo-transfer rank-local` streams each rank's local TP shard
 without reconstructing full blocks, and VAE patch parallelism splits tiled
 decode across both GPUs. cuDNN attention is selected explicitly for the RTX
 consumer path; the server stays eager to avoid an unqualified compile path.
@@ -517,10 +517,11 @@ For example, keep the first main block's attention projections in BF16 with:
 ```
 
 The structured option replaces `--quantization fp8`. Online FP8 can be used
-with H3 layerwise offload and with both DLO transfer paths. The default
-AllGather path uses the ordinary loader to finalize FP8 weights and scales
-before sharding them across ranks. `--dlo-no-use-allgather` instead retains
-complete rank-local tensors and avoids the synchronized request-wave contract.
+with H3 layerwise offload and with either DiT DLO transfer. DiT `allgather`
+uses the ordinary loader to finalize FP8 weights and scales before sharding
+them across ranks. DiT `rank-local` instead retains complete loader-produced
+tensors and avoids the synchronized request-wave contract. H3's TP-sharded
+text encoder uses `rank-local`.
 
 ## AMD ROCm (gfx942 / gfx950)
 
