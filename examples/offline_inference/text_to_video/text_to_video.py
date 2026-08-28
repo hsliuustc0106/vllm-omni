@@ -306,17 +306,13 @@ def parse_args() -> argparse.Namespace:
         help="Disable torch.compile and force eager execution.",
     )
     parser.add_argument(
-        "--enable-cpu-offload",
-        action="store_true",
-        help="Enable CPU offloading for diffusion models.",
+        "--offload-strategy",
+        choices=("none", "model", "layerwise", "distributed-layerwise"),
+        default="none",
+        help="CPU-offload scheduling policy.",
     )
     parser.add_argument(
-        "--enable-layerwise-offload",
-        action="store_true",
-        help="Enable layerwise (blockwise) offloading.",
-    )
-    parser.add_argument(
-        "--layerwise-offload-components",
+        "--offload-components",
         type=str,
         default=None,
         help=(
@@ -494,11 +490,10 @@ def main():
 
     omni_kwargs = dict(
         model=args.model,
-        enable_layerwise_offload=args.enable_layerwise_offload,
-        layerwise_offload_components=args.layerwise_offload_components,
+        offload_strategy=args.offload_strategy,
+        offload_components=args.offload_components,
         vae_use_slicing=args.vae_use_slicing,
         vae_use_tiling=args.vae_use_tiling,
-        enable_cpu_offload=args.enable_cpu_offload,
         ulysses_degree=args.ulysses_degree,
         ring_degree=args.ring_degree,
         cfg_parallel_size=args.cfg_parallel_size,

@@ -137,8 +137,8 @@ vllm serve "${MODEL}" \
   --trust-remote-code \
   --task-type fl2va \
   --num-gpus 1 \
-  --enable-layerwise-offload \
-  --layerwise-offload-components dit,text_encoder \
+  --offload-strategy layerwise \
+  --offload-components dit,text_encoder \
   --enforce-eager \
   --diffusion-attention-backend FLASH_ATTN
 ```
@@ -191,8 +191,8 @@ vllm serve "${MODEL}" \
   --vae-patch-parallel-size 2 \
   --vae-parallel-mode tile \
   --vae-use-tiling \
-  --enable-distributed-layerwise-offload \
-  --layerwise-offload-components dit,text_encoder \
+  --offload-strategy distributed-layerwise \
+  --offload-components dit,text_encoder \
   --dlo-transfer rank-local \
   --dlo-resident-layers 20 \
   --enforce-eager \
@@ -483,8 +483,9 @@ Add this option to an existing H3 server command:
 Use the FL2VA-only partition for this capacity test. Loading the combined
 service would also load the Ref2VA DiT and would test a different memory
 budget. A no-offload capacity check should contain none of
-`--enable-cpu-offload`, `--enable-layerwise-offload`, or
-`--enable-distributed-layerwise-offload`. VAE tiling changes decode placement
+`--offload-strategy model`, `--offload-strategy layerwise`, or
+`--offload-strategy distributed-layerwise`. The corresponding legacy
+`--enable-*-offload` aliases still work. VAE tiling changes decode placement
 but does not offload model weights to the CPU.
 
 The run passes the capacity check when the server initializes, the request

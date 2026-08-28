@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 
 import torch
@@ -34,12 +34,14 @@ class SequentialOffloadHook(ModelHook):
         device: torch.device,
         pin_memory: bool = True,
         use_hsdp: bool = False,
+        offload_after_context: bool = True,
     ):
         # Modules to offload to CPU before this module runs
         self.offload_targets = offload_targets
         self.device = device
         self.pin_memory = pin_memory
         self.use_hsdp = use_hsdp
+        self.offload_after_context = offload_after_context
 
     @staticmethod
     def _move_params(
@@ -127,6 +129,8 @@ def apply_sequential_offload(
     pin_memory: bool = True,
     use_hsdp: bool = False,
     offload_initial_dits: bool = False,
+    offload_dit_modules: Collection[nn.Module] | None = None,
+    offload_encoder_modules: Collection[nn.Module] | None = None,
 ) -> None:
     """Apply sequential offloading hooks to DiT and encoder modules.
 
@@ -141,6 +145,10 @@ def apply_sequential_offload(
         pin_memory: Whether to pin CPU memory for faster transfers
         use_hsdp: Whether HSDP is enabled (affects non_blocking behavior)
         offload_initial_dits: Whether to begin with all DiT modules on CPU.
+        offload_dit_modules: DiT modules allowed to move to CPU. None selects
+            every DiT for backward compatibility.
+        offload_encoder_modules: Encoder/stage modules allowed to move to CPU.
+            None selects every supplied module for backward compatibility.
 
     Example:
         >>> apply_sequential_offload(
@@ -150,27 +158,37 @@ def apply_sequential_offload(
         ... )
         >>> # Modules of pipeline now automatically swap between CPU and GPU
     """
-    # Register hooks on DiT modules (offload encoders AND other DiTs when a DiT runs)
+    selected_dit_ids = {id(module) for module in (dit_modules if offload_dit_modules is None else offload_dit_modules)}
+    selected_encoder_ids = {
+        id(module) for module in (encoder_modules if offload_encoder_modules is None else offload_encoder_modules)
+    }
+
+    # Register hooks on DiT modules (offload selected encoders and other selected DiTs).
     for i, dit_mod in enumerate(dit_modules):
-        other_dits = [d for j, d in enumerate(dit_modules) if j != i]
+        other_dits = [d for j, d in enumerate(dit_modules) if j != i and id(d) in selected_dit_ids]
+        selected_encoders = [encoder for encoder in encoder_modules if id(encoder) in selected_encoder_ids]
         registry = HookRegistry.get_or_create(dit_mod)
         hook = SequentialOffloadHook(
-            offload_targets=encoder_modules + other_dits,
+            offload_targets=selected_encoders + other_dits,
             device=device,
             pin_memory=pin_memory,
             use_hsdp=use_hsdp,
+            offload_after_context=id(dit_mod) in selected_dit_ids,
         )
         registry.register_hook(SequentialOffloadHook._HOOK_NAME, hook)
         logger.debug("Registered offload hook for %s", dit_mod.__class__.__name__)
 
-    # Register hooks on encoders (offload DiTs when encoder runs)
+    # Register hooks on all execution stages so unselected resident modules can
+    # still evict selected DiTs before they run.
+    selected_dits = [dit for dit in dit_modules if id(dit) in selected_dit_ids]
     for enc in encoder_modules:
         registry = HookRegistry.get_or_create(enc)
         hook = SequentialOffloadHook(
-            offload_targets=dit_modules,
+            offload_targets=selected_dits,
             device=device,
             pin_memory=pin_memory,
             use_hsdp=use_hsdp,
+            offload_after_context=id(enc) in selected_encoder_ids,
         )
         registry.register_hook(SequentialOffloadHook._HOOK_NAME, hook)
         logger.debug("Registered offload hook for %s", enc.__class__.__name__)
@@ -178,6 +196,8 @@ def apply_sequential_offload(
     if offload_initial_dits:
         try:
             for dit_mod in dit_modules:
+                if id(dit_mod) not in selected_dit_ids:
+                    continue
                 _get_sequential_offload_hook(dit_mod)._to_cpu(dit_mod)
         except Exception:
             remove_sequential_offload([*dit_modules, *encoder_modules])
@@ -218,12 +238,14 @@ def sequential_offload_component(module: nn.Module) -> Iterator[None]:
         yield
     except BaseException:
         try:
-            hook._to_cpu(module)
+            if hook.offload_after_context:
+                hook._to_cpu(module)
         except Exception:
             logger.exception("Failed to release %s after component failure", module.__class__.__name__)
         raise
     else:
-        hook._to_cpu(module)
+        if hook.offload_after_context:
+            hook._to_cpu(module)
 
 
 class ModelLevelOffloadBackend(OffloadBackend):
@@ -245,11 +267,19 @@ class ModelLevelOffloadBackend(OffloadBackend):
         # Pipelines with non-forward component entry points own their complete
         # mutual-exclusion lifecycle. Delegate through the explicit protocol.
         if isinstance(pipeline, SupportsModelCpuOffload):
-            pipeline.enable_omni_model_cpu_offload(
-                device=self.device,
-                pin_memory=self.config.pin_cpu_memory,
-                use_hsdp=self.config.use_hsdp,
-            )
+            if self.config.components_explicit:
+                pipeline.enable_omni_model_cpu_offload(
+                    device=self.device,
+                    pin_memory=self.config.pin_cpu_memory,
+                    use_hsdp=self.config.use_hsdp,
+                    offload_components=self.config.components,
+                )
+            else:
+                pipeline.enable_omni_model_cpu_offload(
+                    device=self.device,
+                    pin_memory=self.config.pin_cpu_memory,
+                    use_hsdp=self.config.use_hsdp,
+                )
             self._custom_pipeline = pipeline
             self.enabled = True
             logger.info(
@@ -296,6 +326,12 @@ class ModelLevelOffloadBackend(OffloadBackend):
             device=self.device,
             pin_memory=self.config.pin_cpu_memory,
             use_hsdp=self.config.use_hsdp,
+            offload_dit_modules=(
+                modules.dits if not self.config.components_explicit or self.config.offloads("dit") else ()
+            ),
+            offload_encoder_modules=(
+                modules.encoders if not self.config.components_explicit or self.config.offloads("text_encoder") else ()
+            ),
         )
 
         # Track modules for cleanup

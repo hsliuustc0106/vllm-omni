@@ -8,7 +8,7 @@ import random
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import diffusers
 import huggingface_hub
@@ -779,6 +779,10 @@ class OmniDiffusionConfig:
     output_type: str = "pil"
 
     # CPU offload parameters
+    # Canonical policy and strategy-independent component selection.
+    offload_strategy: Literal["none", "model", "layerwise", "distributed-layerwise"] | None = None
+    offload_components: str | list[str] | None = None
+    # Deprecated compatibility aliases for offload_strategy.
     # When enabled, DiT and encoders swap GPU access (mutual exclusion):
     # - Text encoders run on GPU while DiT is on CPU
     # - DiT runs on GPU while encoders are on CPU
@@ -787,9 +791,6 @@ class OmniDiffusionConfig:
     enable_layerwise_offload: bool = False
     # Distributed layer-wise offloading with H2D + AllGather overlap (RFC-1)
     enable_distributed_layerwise_offload: bool = False
-    # Optional component filter: dit,text_encoder,all.
-    # None preserves the existing DiT-only behavior.
-    layerwise_offload_components: str | list[str] | None = None
     # DLO transfer mode. A scalar applies to every selected component; a
     # component map allows independent DiT/text-encoder selection.
     dlo_transfer: str | dict[str, str] | None = None
@@ -1035,6 +1036,9 @@ class OmniDiffusionConfig:
         )
 
     def __post_init__(self):
+        from vllm_omni.diffusion.offloader.config import materialize_legacy_offload_flags
+
+        offload_strategy = materialize_legacy_offload_flags(self)
         if self.diffusion_compile_granularity not in {"regional", "full"}:
             raise ValueError(
                 "diffusion_compile_granularity must be 'regional' or 'full', "
@@ -1116,10 +1120,8 @@ class OmniDiffusionConfig:
                 incompatible_features.append("HSDP")
             if self.parallel_config.sequence_parallel_size > 1:
                 incompatible_features.append("sequence parallelism")
-            if self.enable_cpu_offload:
-                incompatible_features.append("CPU offload")
-            if self.enable_layerwise_offload:
-                incompatible_features.append("layerwise offload")
+            if offload_strategy.value != "none":
+                incompatible_features.append(f"{offload_strategy.value} offload")
             if incompatible_features:
                 features = ", ".join(incompatible_features)
                 raise ValueError(
@@ -1191,15 +1193,17 @@ class OmniDiffusionConfig:
         )
         from vllm_omni.diffusion.offloader.config import (
             DIT_COMPONENT,
+            OffloadStrategy,
             component_uses_allgather,
-            selected_dlo_components,
+            selected_offload_components,
+            uses_offload_strategy,
         )
 
-        selected_components = selected_dlo_components(self)
+        selected_components = selected_offload_components(self)
 
         self.dlo_host_registration_limit_gib = validate_dlo_host_registration_options(
             limit_gib=self.dlo_host_registration_limit_gib,
-            enable_dlo=self.enable_distributed_layerwise_offload,
+            enable_dlo=uses_offload_strategy(self, OffloadStrategy.DISTRIBUTED_LAYER_WISE),
             # Registration is a DiT host-storage optimization. Treat an
             # encoder-only selection as ineligible rather than accepting a
             # budget that no loader path will consume.

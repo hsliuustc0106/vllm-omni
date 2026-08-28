@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """Cosmos3 text/image/video/sound/action pipeline for vllm-omni.
 
 One pipeline class serves the Cosmos3 family modes. Output modality is selected
@@ -1086,6 +1086,7 @@ class Cosmos3OmniDiffusersPipeline(
         device: torch.device,
         pin_memory: bool = True,
         use_hsdp: bool = False,
+        offload_components: frozenset[str] | None = None,
     ) -> None:
         """Enable Cosmos3 component-level model offload.
 
@@ -1094,6 +1095,11 @@ class Cosmos3OmniDiffusersPipeline(
         mutual-exclusion swaps.  The VAE stays resident on GPU like the generic
         model-level offloader.
         """
+        if offload_components is not None:
+            raise ValueError(
+                "Cosmos3 model offload uses reasoner/generator topology and does not support "
+                "the dit/text_encoder offload_components selector"
+            )
         self.vae.to(device, non_blocking=True)
         if isinstance(self._sound_tokenizer, nn.Module):
             self._sound_tokenizer.to(device)

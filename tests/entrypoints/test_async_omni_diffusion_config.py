@@ -401,8 +401,9 @@ def test_serve_cli_forwards_distributed_offload_residency():
             "serve",
             "MiniMaxAI/MiniMax-H3",
             "--omni",
-            "--enable-distributed-layerwise-offload",
-            "--layerwise-offload-components",
+            "--offload-strategy",
+            "distributed-layerwise",
+            "--offload-components",
             "dit,text_encoder",
             "--dlo-transfer",
             "dit=rank-local,text_encoder=rank-local",
@@ -415,13 +416,13 @@ def test_serve_cli_forwards_distributed_offload_residency():
     stage_cfg = AsyncOmniEngine._create_default_diffusion_stage_cfg(explicit_kwargs)[0]
     engine_args = stage_cfg["engine_args"]
 
-    assert args.enable_distributed_layerwise_offload is True
-    assert args.layerwise_offload_components == "dit,text_encoder"
+    assert args.offload_strategy == "distributed-layerwise"
+    assert args.offload_components == "dit,text_encoder"
     assert args.dlo_transfer == "dit=rank-local,text_encoder=rank-local"
     assert args.dlo_use_allgather is True
     assert args.dlo_resident_layers == 20
-    assert engine_args["enable_distributed_layerwise_offload"] is True
-    assert engine_args["layerwise_offload_components"] == "dit,text_encoder"
+    assert engine_args["offload_strategy"] == "distributed-layerwise"
+    assert engine_args["offload_components"] == "dit,text_encoder"
     assert engine_args["dlo_transfer"] == "dit=rank-local,text_encoder=rank-local"
     assert engine_args["dlo_use_allgather"] is True
     assert engine_args["dlo_resident_layers"] == 20

@@ -44,7 +44,7 @@ from vllm_omni.diffusion.models.diffusers_adapter.pipeline_diffusers_adapter imp
 from vllm_omni.diffusion.offloader.config import (
     DIT_COMPONENT,
     component_uses_allgather,
-    selected_dlo_components,
+    selected_offload_components,
 )
 from vllm_omni.diffusion.offloader.module_collector import ModuleDiscovery
 from vllm_omni.diffusion.registry import initialize_model
@@ -519,7 +519,7 @@ class DiffusersPipelineLoader(HWRLoaderMixin):
 
                 _dist_offload = bool(
                     getattr(self.od_config, "enable_distributed_layerwise_offload", False)
-                    and DIT_COMPONENT in selected_dlo_components(self.od_config)
+                    and DIT_COMPONENT in selected_offload_components(self.od_config)
                 )
                 _use_ag = component_uses_allgather(self.od_config, DIT_COMPONENT)
                 _has_online_quant = self._has_online_quant(model)

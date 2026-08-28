@@ -498,10 +498,11 @@ class TestLayerwiseComponentSelection:
 
 def _offload_od_config(**overrides):
     values = {
+        "offload_strategy": None,
         "enable_cpu_offload": False,
         "enable_layerwise_offload": False,
         "enable_distributed_layerwise_offload": False,
-        "layerwise_offload_components": None,
+        "offload_components": None,
         "dlo_transfer": None,
         "dlo_use_allgather": True,
         "dlo_resident_layers": 0,
@@ -517,19 +518,19 @@ class TestLayerwiseComponentConfig:
     def test_csv_and_sequence_values_are_normalized(self):
         csv_config = OffloadConfig.from_od_config(
             _offload_od_config(
-                enable_layerwise_offload=True,
-                layerwise_offload_components="dit, text_encoder",
+                offload_strategy="layerwise",
+                offload_components="dit, text_encoder",
             )
         )
         sequence_config = OffloadConfig.from_od_config(
-            _offload_od_config(enable_layerwise_offload=True, layerwise_offload_components=["all"])
+            _offload_od_config(offload_strategy="layerwise", offload_components=["all"])
         )
 
         assert csv_config.components == frozenset({"dit", "text_encoder"})
         assert sequence_config.components == frozenset({"dit", "text_encoder"})
 
     def test_omitted_selector_preserves_legacy_dit_only_behavior(self):
-        config = OffloadConfig.from_od_config(_offload_od_config(enable_layerwise_offload=True))
+        config = OffloadConfig.from_od_config(_offload_od_config(offload_strategy="layerwise"))
 
         assert config.components == frozenset({"dit"})
         assert config.offloads("dit")
@@ -538,8 +539,8 @@ class TestLayerwiseComponentConfig:
     def test_all_selects_the_two_supported_components(self):
         all_config = OffloadConfig.from_od_config(
             _offload_od_config(
-                enable_layerwise_offload=True,
-                layerwise_offload_components="all,dit",
+                offload_strategy="layerwise",
+                offload_components="all,dit",
             )
         )
         assert all_config.components == frozenset({"dit", "text_encoder"})
@@ -549,32 +550,32 @@ class TestLayerwiseComponentConfig:
 
     def test_removed_auxiliary_selectors_are_rejected(self):
         for selector in ("default", "image_encoder", "vae"):
-            with pytest.raises(ValueError, match="Unknown layerwise offload"):
+            with pytest.raises(ValueError, match="Unknown offload component"):
                 OffloadConfig.from_od_config(
                     _offload_od_config(
-                        enable_layerwise_offload=True,
-                        layerwise_offload_components=selector,
+                        offload_strategy="layerwise",
+                        offload_components=selector,
                     )
                 )
 
     def test_unknown_component_is_rejected(self):
-        with pytest.raises(ValueError, match="Unknown layerwise offload"):
+        with pytest.raises(ValueError, match="Unknown offload component"):
             OffloadConfig.from_od_config(
                 _offload_od_config(
-                    enable_layerwise_offload=True,
-                    layerwise_offload_components="dit,scheduler",
+                    offload_strategy="layerwise",
+                    offload_components="dit,scheduler",
                 )
             )
 
-    def test_component_filter_requires_layerwise_strategy(self):
-        with pytest.raises(ValueError, match="requires layerwise"):
-            OffloadConfig.from_od_config(_offload_od_config(layerwise_offload_components="text_encoder"))
+    def test_component_filter_requires_an_offload_strategy(self):
+        with pytest.raises(ValueError, match="requires offload_strategy"):
+            OffloadConfig.from_od_config(_offload_od_config(offload_components="text_encoder"))
 
     def test_distributed_encoder_only_is_allowed(self):
         config = OffloadConfig.from_od_config(
             _offload_od_config(
-                enable_distributed_layerwise_offload=True,
-                layerwise_offload_components="text_encoder",
+                offload_strategy="distributed-layerwise",
+                offload_components="text_encoder",
                 dlo_transfer="rank-local",
             )
         )
@@ -585,8 +586,8 @@ class TestLayerwiseComponentConfig:
     def test_distributed_offload_accepts_all(self):
         config = OffloadConfig.from_od_config(
             _offload_od_config(
-                enable_distributed_layerwise_offload=True,
-                layerwise_offload_components="all",
+                offload_strategy="distributed-layerwise",
+                offload_components="all",
             )
         )
 
@@ -596,8 +597,8 @@ class TestLayerwiseComponentConfig:
     def test_component_transfer_map_is_independent(self):
         config = OffloadConfig.from_od_config(
             _offload_od_config(
-                enable_distributed_layerwise_offload=True,
-                layerwise_offload_components="dit,text_encoder",
+                offload_strategy="distributed-layerwise",
+                offload_components="dit,text_encoder",
                 dlo_transfer="dit=rank-local,text_encoder=allgather",
             )
         )
@@ -610,8 +611,8 @@ class TestLayerwiseComponentConfig:
         with pytest.raises(ValueError, match="not selected"):
             OffloadConfig.from_od_config(
                 _offload_od_config(
-                    enable_distributed_layerwise_offload=True,
-                    layerwise_offload_components="dit",
+                    offload_strategy="distributed-layerwise",
+                    offload_components="dit",
                     dlo_transfer="text_encoder=rank-local",
                 )
             )
@@ -619,10 +620,46 @@ class TestLayerwiseComponentConfig:
     def test_single_gpu_encoder_only_is_allowed(self):
         config = OffloadConfig.from_od_config(
             _offload_od_config(
-                enable_layerwise_offload=True,
-                layerwise_offload_components="text_encoder",
+                offload_strategy="layerwise",
+                offload_components="text_encoder",
             )
         )
 
         assert config.strategy is OffloadStrategy.LAYER_WISE
         assert config.components == frozenset({"text_encoder"})
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("none", OffloadStrategy.NONE),
+            ("model", OffloadStrategy.MODEL_LEVEL),
+            ("layerwise", OffloadStrategy.LAYER_WISE),
+            ("distributed-layerwise", OffloadStrategy.DISTRIBUTED_LAYER_WISE),
+        ],
+    )
+    def test_canonical_strategy_values(self, value, expected):
+        config = OffloadConfig.from_od_config(_offload_od_config(offload_strategy=value))
+
+        assert config.strategy is expected
+
+    def test_matching_legacy_alias_still_works(self):
+        config = OffloadConfig.from_od_config(_offload_od_config(enable_layerwise_offload=True))
+
+        assert config.strategy is OffloadStrategy.LAYER_WISE
+
+    def test_model_strategy_accepts_explicit_components(self):
+        config = OffloadConfig.from_od_config(
+            _offload_od_config(offload_strategy="model", offload_components="dit,text_encoder")
+        )
+
+        assert config.strategy is OffloadStrategy.MODEL_LEVEL
+        assert config.components == frozenset({"dit", "text_encoder"})
+        assert config.components_explicit is True
+
+    def test_conflicting_legacy_aliases_fail(self):
+        with pytest.raises(ValueError, match="Conflicting legacy offload strategy flags"):
+            OffloadConfig.from_od_config(_offload_od_config(enable_cpu_offload=True, enable_layerwise_offload=True))
+
+    def test_canonical_strategy_conflict_with_legacy_alias_fails(self):
+        with pytest.raises(ValueError, match="conflicts with legacy"):
+            OffloadConfig.from_od_config(_offload_od_config(offload_strategy="layerwise", enable_cpu_offload=True))

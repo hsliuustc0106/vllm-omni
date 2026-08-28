@@ -29,18 +29,19 @@ from vllm_omni import Omni
 
 omni = Omni(
     model="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-    enable_layerwise_offload=True,
+    offload_strategy="layerwise",
 )
 ```
 
 ```bash
 vllm serve Wan-AI/Wan2.2-T2V-A14B-Diffusers \
-  --omni --enable-layerwise-offload
+  --omni --offload-strategy layerwise
 ```
 
 ## Component selection
 
-Use `--layerwise-offload-components` with `dit`, `text_encoder`, or both:
+Use the policy-independent `--offload-components` selector with `dit`,
+`text_encoder`, or both:
 
 - Omitting the option selects `dit`, preserving the existing DiT-only behavior.
 - `all` selects both supported categories.
@@ -49,12 +50,12 @@ Use `--layerwise-offload-components` with `dit`, `text_encoder`, or both:
 ```bash
 # Backward-compatible DiT-only behavior
 vllm serve /path/to/model --omni \
-  --enable-layerwise-offload
+  --offload-strategy layerwise
 
 # Stream a model-declared text encoder while keeping the DiT resident
 vllm serve /path/to/model --omni \
-  --enable-layerwise-offload \
-  --layerwise-offload-components text_encoder
+  --offload-strategy layerwise \
+  --offload-components text_encoder
 ```
 
 Encoder categories are resolved from `OffloadPlan.encoder_component_types`

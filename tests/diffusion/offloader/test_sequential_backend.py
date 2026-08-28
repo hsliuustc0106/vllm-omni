@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 """Unit tests for SequentialOffloadBackend."""
 
@@ -52,7 +52,7 @@ def test_model_level_backend_delegates_to_custom_pipeline_offload() -> None:
     class CustomPipeline(nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.enable_args = None
+            self.enable_args: dict[str, object] | None = None
             self.disable_called = False
 
         def enable_omni_model_cpu_offload(self, **kwargs) -> None:
@@ -80,6 +80,59 @@ def test_model_level_backend_delegates_to_custom_pipeline_offload() -> None:
 
     assert backend.enabled is False
     assert pipeline.disable_called is True
+
+
+def test_model_level_backend_passes_explicit_component_selection() -> None:
+    class CustomPipeline(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.enable_args: dict[str, object] | None = None
+
+        def enable_omni_model_cpu_offload(self, **kwargs) -> None:
+            self.enable_args = kwargs
+
+        def disable_omni_model_cpu_offload(self) -> None:
+            pass
+
+    pipeline = CustomPipeline()
+    backend = ModelLevelOffloadBackend(
+        OffloadConfig(
+            strategy=OffloadStrategy.MODEL_LEVEL,
+            components=frozenset({"dit", "text_encoder"}),
+            components_explicit=True,
+        ),
+        torch.device("cpu"),
+    )
+
+    backend.enable(pipeline)
+
+    assert pipeline.enable_args is not None
+    assert pipeline.enable_args["offload_components"] == frozenset({"dit", "text_encoder"})
+
+
+def test_sequential_offload_filters_cpu_eligible_components() -> None:
+    dit = _create_simple_module()
+    encoder = _create_simple_module()
+    resident_stage = _create_simple_module()
+
+    apply_sequential_offload(
+        dit_modules=[dit],
+        encoder_modules=[encoder, resident_stage],
+        device=torch.device("cpu"),
+        offload_dit_modules=[dit],
+        offload_encoder_modules=[encoder],
+    )
+
+    dit_hook = dit._hook_registry.get_hook(SequentialOffloadHook._HOOK_NAME)
+    encoder_hook = encoder._hook_registry.get_hook(SequentialOffloadHook._HOOK_NAME)
+    resident_hook = resident_stage._hook_registry.get_hook(SequentialOffloadHook._HOOK_NAME)
+    assert dit_hook.offload_targets == [encoder]
+    assert encoder_hook.offload_targets == [dit]
+    assert encoder_hook.offload_after_context is True
+    assert resident_hook.offload_targets == [dit]
+    assert resident_hook.offload_after_context is False
+
+    remove_sequential_offload([dit, encoder, resident_stage])
 
 
 def test_sequential_offload_can_begin_with_dit_on_cpu(monkeypatch: pytest.MonkeyPatch) -> None:

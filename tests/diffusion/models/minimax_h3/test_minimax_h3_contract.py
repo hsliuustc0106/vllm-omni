@@ -1238,7 +1238,7 @@ def test_layerwise_encoder_selection_releases_text_encoder(components):
         enable_cpu_offload=False,
         enable_layerwise_offload=True,
         enable_distributed_layerwise_offload=False,
-        layerwise_offload_components=components,
+        offload_components=components,
     )
     pipeline.text_encoder = Mock()
     expected = torch.ones(2, 3)
@@ -1260,7 +1260,7 @@ def test_layerwise_dit_only_keeps_text_encoder_resident():
         enable_cpu_offload=False,
         enable_layerwise_offload=True,
         enable_distributed_layerwise_offload=False,
-        layerwise_offload_components="dit",
+        offload_components="dit",
     )
     pipeline.text_encoder = Mock()
     expected = torch.ones(2, 3)
@@ -1283,7 +1283,7 @@ def test_distributed_layerwise_encoder_selection_releases_text_encoder(component
         enable_cpu_offload=False,
         enable_layerwise_offload=False,
         enable_distributed_layerwise_offload=True,
-        layerwise_offload_components=components,
+        offload_components=components,
     )
     pipeline.text_encoder = Mock()
     expected = torch.ones(2, 3)
@@ -1308,7 +1308,7 @@ def test_standalone_audio_conditions_keep_audio_vae_resident(monkeypatch):
     pipeline.od_config = SimpleNamespace(
         enable_layerwise_offload=True,
         enable_distributed_layerwise_offload=False,
-        layerwise_offload_components="all",
+        offload_components="all",
     )
     pipeline.audio_vae = Mock()
     pipeline.audio_vae.encode_waveform.side_effect = [
@@ -1333,7 +1333,7 @@ def test_distributed_layerwise_all_keeps_vae_component_resident():
     pipeline.od_config = SimpleNamespace(
         enable_layerwise_offload=False,
         enable_distributed_layerwise_offload=True,
-        layerwise_offload_components="all",
+        offload_components="all",
     )
     component = Mock()
 
@@ -1352,7 +1352,7 @@ def test_dit_encoder_selection_keeps_vae_resident():
     pipeline.od_config = SimpleNamespace(
         enable_layerwise_offload=True,
         enable_distributed_layerwise_offload=False,
-        layerwise_offload_components="dit,text_encoder",
+        offload_components="dit,text_encoder",
     )
     component = Mock()
 

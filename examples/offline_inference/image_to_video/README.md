@@ -146,8 +146,8 @@ python image_to_video.py \
 | `--vae-use-slicing` | flag | off | Enable VAE slicing for memory optimization |
 | `--vae-use-tiling` | flag | off | Enable VAE tiling for memory optimization |
 | `--enable-cpu-offload` | flag | off | Enable CPU offloading for diffusion models |
-| `--enable-layerwise-offload` | flag | off | Enable layerwise (blockwise) offloading |
-| `--layerwise-offload-components` | str | unset (`dit`) | Comma-separated `dit` and `text_encoder` selection; `all` selects both |
+| `--offload-strategy` | choice | `none` | Select `model`, `layerwise`, or `distributed-layerwise` CPU offload |
+| `--offload-components` | str | unset (`dit`) | Comma-separated `dit` and `text_encoder` selection; `all` selects both |
 | `--cfg-parallel-size` | int | `1` | Set to `2` to enable CFG Parallel |
 | `--tensor-parallel-size` | int | `1` | Tensor parallel size (effective for models that support TP, e.g. LTX2) |
 | `--ulysses-degree` | int | `1` | Ulysses sequence parallel degree |
@@ -440,7 +440,7 @@ assets, see the [LoRA guide](../../../docs/user_guide/diffusion/lora.md#wan22-li
 
 ## FAQ
 
-**OOM errors**: Try using `--vae-use-slicing` and `--vae-use-tiling` to reduce memory usage. For very large models, add `--enable-cpu-offload` or `--enable-layerwise-offload`.
+**OOM errors**: Try using `--vae-use-slicing` and `--vae-use-tiling` to reduce memory usage. For very large models, add `--offload-strategy model` or `--offload-strategy layerwise`.
 
 **Auto-calculated resolution**: If `--height` and `--width` are not provided, the script calculates output dimensions from the input image while maintaining aspect ratio and targeting 480 x 832 area (or 512 x 768 for LTX2).
 

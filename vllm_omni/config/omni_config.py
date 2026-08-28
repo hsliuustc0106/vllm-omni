@@ -693,10 +693,12 @@ class _DiffusionConfigProjection:
     lora_backend: str = "peft"
     max_cpu_loras: int | None = None
     output_type: str = "pil"
+    offload_strategy: Literal["none", "model", "layerwise", "distributed-layerwise"] | None = None
+    offload_components: str | list[str] | None = None
+    # Deprecated compatibility aliases for offload_strategy.
     enable_cpu_offload: bool = False
     enable_layerwise_offload: bool = False
     enable_distributed_layerwise_offload: bool = False
-    layerwise_offload_components: str | list[str] | None = None
     dlo_transfer: str | dict[str, str] | None = None
     dlo_use_allgather: bool = True
     dlo_resident_layers: int = Field(default=0, ge=0)
@@ -764,7 +766,10 @@ class _DiffusionConfigProjection:
             validate_host_weight_runtime_options,
         )
         from vllm_omni.diffusion.diffusion_kv.config import parse_diffusion_kv_cache_mode
+        from vllm_omni.diffusion.offloader.config import materialize_legacy_offload_flags
         from vllm_omni.quantization import build_quant_config
+
+        materialize_legacy_offload_flags(self)
 
         if self.tf_model_config is None:
             self.tf_model_config = TransformerConfig()
@@ -845,15 +850,17 @@ class _DiffusionConfigProjection:
         )
         from vllm_omni.diffusion.offloader.config import (
             DIT_COMPONENT,
+            OffloadStrategy,
             component_uses_allgather,
-            selected_dlo_components,
+            selected_offload_components,
+            uses_offload_strategy,
         )
 
-        selected_components = selected_dlo_components(self)
+        selected_components = selected_offload_components(self)
 
         self.dlo_host_registration_limit_gib = validate_dlo_host_registration_options(
             limit_gib=self.dlo_host_registration_limit_gib,
-            enable_dlo=self.enable_distributed_layerwise_offload,
+            enable_dlo=uses_offload_strategy(self, OffloadStrategy.DISTRIBUTED_LAYER_WISE),
             use_allgather=(DIT_COMPONENT not in selected_components or component_uses_allgather(self, DIT_COMPONENT)),
             hwr_mode=self.host_weight_runtime_mode,
         )

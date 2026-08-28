@@ -567,10 +567,12 @@ class OrchestratorArgs:
     vae_use_tiling: bool = False
     enable_multithread_weight_load: bool = True
     num_weight_load_threads: int = 4
+    offload_strategy: str | None = None
+    offload_components: str | list[str] | None = None
+    # Deprecated compatibility aliases for offload_strategy.
     enable_cpu_offload: bool = False
     enable_layerwise_offload: bool = False
     enable_distributed_layerwise_offload: bool = False
-    layerwise_offload_components: str | list[str] | None = None
     dlo_transfer: str | dict[str, str] | None = None
     dlo_use_allgather: bool = True
     dlo_resident_layers: int = 0

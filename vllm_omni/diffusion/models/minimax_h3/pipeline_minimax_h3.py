@@ -53,6 +53,7 @@ from vllm_omni.diffusion.offloader import (
     sequential_offload_component,
 )
 from vllm_omni.diffusion.offloader.base import (
+    DIT_COMPONENT,
     TEXT_ENCODER_COMPONENT,
     should_offload_component,
 )
@@ -1394,6 +1395,7 @@ class MiniMaxH3Pipeline(
         device: torch.device,
         pin_memory: bool,
         use_hsdp: bool,
+        offload_components: frozenset[str] | None = None,
     ) -> None:
         if getattr(self, "_model_cpu_offload_modules", None):
             return
@@ -1402,19 +1404,33 @@ class MiniMaxH3Pipeline(
         dits = components.dits
         stages = [*components.encoders, *components.vaes]
         modules = [*dits, *stages]
-        apply_sequential_offload(
-            dit_modules=dits,
-            encoder_modules=stages,
-            device=device,
-            pin_memory=pin_memory,
-            use_hsdp=use_hsdp,
-            offload_initial_dits=True,
-        )
+        if offload_components is None:
+            apply_sequential_offload(
+                dit_modules=dits,
+                encoder_modules=stages,
+                device=device,
+                pin_memory=pin_memory,
+                use_hsdp=use_hsdp,
+                offload_initial_dits=True,
+            )
+        else:
+            selected_dits = dits if DIT_COMPONENT in offload_components else ()
+            selected_encoders = components.encoders if TEXT_ENCODER_COMPONENT in offload_components else ()
+            apply_sequential_offload(
+                dit_modules=dits,
+                encoder_modules=stages,
+                device=device,
+                pin_memory=pin_memory,
+                use_hsdp=use_hsdp,
+                offload_initial_dits=bool(selected_dits),
+                offload_dit_modules=selected_dits,
+                offload_encoder_modules=selected_encoders,
+            )
 
         self._model_cpu_offload_modules = modules
         logger.info(
-            "MiniMax-H3 model-level CPU offload enabled for %d DiT(s), text encoder, video VAE, and audio VAE",
-            len(dits),
+            "MiniMax-H3 model-level CPU offload enabled for selected components: %s",
+            sorted(offload_components) if offload_components is not None else "legacy full topology",
         )
 
     def disable_omni_model_cpu_offload(self) -> None:

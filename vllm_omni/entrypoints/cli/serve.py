@@ -695,31 +695,39 @@ class OmniServeCommand(CLISubcommand):
 
         # diffusion model offload parameters
         omni_config_group.add_argument(
+            "--offload-strategy",
+            choices=("none", "model", "layerwise", "distributed-layerwise"),
+            default=None,
+            help="CPU-offload scheduling policy. Default: none. The legacy "
+            "--enable-*-offload flags remain compatibility aliases.",
+        )
+        omni_config_group.add_argument(
+            "--offload-components",
+            type=str,
+            default=None,
+            help="Comma-separated diffusion components selected for offload: "
+            "dit,text_encoder,all. Component selection is independent of the "
+            "offload policy; omitted preserves the current DiT-only default for "
+            "block-streaming policies.",
+        )
+        omni_config_group.add_argument(
             "--enable-cpu-offload",
             action="store_true",
-            help="Enable CPU offloading for diffusion models.",
+            help="Deprecated alias for --offload-strategy model.",
         )
         omni_config_group.add_argument(
             "--enable-layerwise-offload",
             action="store_true",
-            help="Enable layerwise (blockwise) offloading on DiT modules.",
+            help="Deprecated alias for --offload-strategy layerwise.",
         )
         omni_config_group.add_argument(
             "--enable-distributed-layerwise-offload",
             action="store_true",
-            help="Enable distributed layerwise offloading with H2D + AllGather overlap. "
+            help="Deprecated alias for --offload-strategy distributed-layerwise. "
+            "Enables H2D + AllGather overlap, "
             "Shards weights across DP ranks, stores only 1/DP_size on each host, "
             "and overlaps H2D transfers and AllGather with computation. "
             "DP size is automatically derived from the parallel configuration.",
-        )
-        omni_config_group.add_argument(
-            "--layerwise-offload-components",
-            type=str,
-            default=None,
-            help="Comma-separated model components within the diffusion stage "
-            "controlled by layerwise offload: dit,text_encoder,all. Omitting "
-            "the option preserves DiT-only offload; all selects both supported "
-            "components.",
         )
         omni_config_group.add_argument(
             "--dlo-transfer",

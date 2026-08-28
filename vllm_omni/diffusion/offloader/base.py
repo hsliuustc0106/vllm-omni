@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import Enum
 from typing import Protocol, runtime_checkable
 
 import torch
@@ -14,65 +13,32 @@ from vllm.logger import init_logger
 from vllm_omni.diffusion.data import OmniDiffusionConfig, validate_dlo_host_registration_options
 
 from .config import (
+    ALL_COMPONENT,
+    DEFAULT_OFFLOAD_COMPONENTS,
     DIT_COMPONENT,
-    DLO_COMPONENTS,
+    OFFLOAD_COMPONENTS,
     TEXT_ENCODER_COMPONENT,
     DLOTransfer,
+    OffloadStrategy,
     parse_dlo_transfer,
+    parse_offload_components,
+    resolve_offload_strategy,
 )
 from .offload_plan import OffloadPlan
 
 logger = init_logger(__name__)
 
-ALL_COMPONENT = "all"
-LAYERWISE_OFFLOAD_COMPONENTS = DLO_COMPONENTS
-LAYERWISE_OFFLOAD_SELECTORS = LAYERWISE_OFFLOAD_COMPONENTS | {ALL_COMPONENT}
-OMITTED_LAYERWISE_OFFLOAD_COMPONENTS = frozenset({DIT_COMPONENT})
-
-
-def parse_layerwise_offload_components(value: str | Collection[str] | None) -> frozenset[str]:
-    """Normalize the public component selection into validated names."""
-    if value is None:
-        return OMITTED_LAYERWISE_OFFLOAD_COMPONENTS
-    if isinstance(value, str):
-        values = value.split(",")
-    elif isinstance(value, Collection):
-        values = list(value)
-    else:
-        raise TypeError(
-            "layerwise_offload_components must be a comma-separated string "
-            f"or a sequence of strings, got {type(value).__name__}"
-        )
-
-    if any(not isinstance(item, str) for item in values):
-        raise TypeError("layerwise_offload_components entries must be strings")
-    components = [item.strip().lower().replace("-", "_") for item in values]
-    if not components or any(not item for item in components):
-        raise ValueError("layerwise_offload_components must not be empty")
-    unknown = sorted(set(components) - LAYERWISE_OFFLOAD_SELECTORS)
-    if unknown:
-        raise ValueError(
-            "Unknown layerwise offload component(s): "
-            f"{', '.join(unknown)}. Choose from: "
-            f"{', '.join(sorted(LAYERWISE_OFFLOAD_SELECTORS))}"
-        )
-    if ALL_COMPONENT in components:
-        return LAYERWISE_OFFLOAD_COMPONENTS
-    normalized = set(components)
-    return frozenset(normalized)
-
 
 def should_offload_component(od_config: OmniDiffusionConfig, component: str) -> bool:
     """Return whether an active layerwise strategy selected ``component``."""
-    if component not in LAYERWISE_OFFLOAD_COMPONENTS:
-        raise ValueError(f"Unknown layerwise offload component: {component}")
-    active = bool(
-        getattr(od_config, "enable_layerwise_offload", False)
-        or getattr(od_config, "enable_distributed_layerwise_offload", False)
-    )
-    if not active:
+    if component not in OFFLOAD_COMPONENTS:
+        raise ValueError(f"Unknown offload component: {component}")
+    if resolve_offload_strategy(od_config) not in {
+        OffloadStrategy.LAYER_WISE,
+        OffloadStrategy.DISTRIBUTED_LAYER_WISE,
+    }:
         return False
-    components = parse_layerwise_offload_components(getattr(od_config, "layerwise_offload_components", None))
+    components = parse_offload_components(getattr(od_config, "offload_components", None))
     return component in components
 
 
@@ -91,16 +57,10 @@ class SupportsModelCpuOffload(Protocol):
         device: torch.device,
         pin_memory: bool,
         use_hsdp: bool,
+        offload_components: frozenset[str] | None = None,
     ) -> None: ...
 
     def disable_omni_model_cpu_offload(self) -> None: ...
-
-
-class OffloadStrategy(Enum):
-    NONE = "none"
-    MODEL_LEVEL = "model_level"  # Sequential offloading between DiT and encoders
-    LAYER_WISE = "layer_wise"  # Block-level
-    DISTRIBUTED_LAYER_WISE = "distributed_layer_wise"  # Block-level with DP sharding + H2D/AllGather overlap
 
 
 @dataclass
@@ -116,11 +76,12 @@ class OffloadConfig:
     # Optional per-worker ceiling for registering an HWR mmap. Zero means no
     # additional ceiling; pin_cpu_memory controls whether registration is tried.
     dlo_host_registration_limit_gib: float = 0.0
-    components: frozenset[str] = OMITTED_LAYERWISE_OFFLOAD_COMPONENTS
+    components: frozenset[str] = DEFAULT_OFFLOAD_COMPONENTS
+    components_explicit: bool = False
     dlo_transfers: dict[str, DLOTransfer] | None = None
 
     def __post_init__(self) -> None:
-        self.components = parse_layerwise_offload_components(self.components)
+        self.components = parse_offload_components(self.components)
         self.dlo_transfers = parse_dlo_transfer(
             self.dlo_transfers,
             legacy_use_allgather=self.dlo_use_allgather,
@@ -163,9 +124,9 @@ class OffloadConfig:
     def from_od_config(cls, od_config: OmniDiffusionConfig) -> "OffloadConfig":
         """Extract and validate offload settings from OmniDiffusionConfig.
 
-        Enforces mutual exclusion among the three offload strategies.
-        Distributed layer-wise takes the highest priority, then layer-wise,
-        then model-level.
+        ``offload_strategy`` is the canonical policy selector. The three
+        historical ``enable_*_offload`` booleans remain compatibility aliases;
+        ambiguous combinations fail instead of using silent precedence.
 
         The ``dp_size`` is automatically derived from ``parallel_config`` —
         it is NOT a user-configurable parameter. The distributed layerwise
@@ -177,9 +138,8 @@ class OffloadConfig:
         Returns:
             OffloadConfig with validated settings
         """
-        enable_cpu_offload = getattr(od_config, "enable_cpu_offload", False)
-        enable_layerwise_offload = getattr(od_config, "enable_layerwise_offload", False)
-        enable_distributed_layerwise_offload = getattr(od_config, "enable_distributed_layerwise_offload", False)
+        strategy = resolve_offload_strategy(od_config)
+        enable_distributed_layerwise_offload = strategy is OffloadStrategy.DISTRIBUTED_LAYER_WISE
         pin_cpu_memory = getattr(od_config, "pin_cpu_memory", True)
 
         parallel_config = getattr(od_config, "parallel_config", None)
@@ -205,32 +165,10 @@ class OffloadConfig:
                 if sp_size and sp_size > 1:
                     dp_size = sp_size
 
-        # Determine strategy (mutual exclusion, distributed layer-wise takes priority)
-        if enable_distributed_layerwise_offload:
-            strategy = OffloadStrategy.DISTRIBUTED_LAYER_WISE
-            if enable_layerwise_offload or enable_cpu_offload:
-                logger.info("Distributed layer-wise offloading takes priority, disabling other offloading strategies.")
-        elif enable_layerwise_offload:
-            strategy = OffloadStrategy.LAYER_WISE
-            if enable_cpu_offload:
-                logger.info(
-                    "Both model-level and layer-wise offloading enabled. "
-                    "Layer-wise takes priority, disabling model-level offloading."
-                )
-        elif enable_cpu_offload:
-            strategy = OffloadStrategy.MODEL_LEVEL
-        else:
-            strategy = OffloadStrategy.NONE
-
-        raw_components = getattr(od_config, "layerwise_offload_components", None)
-        components = parse_layerwise_offload_components(raw_components)
-        if raw_components is not None and strategy not in {
-            OffloadStrategy.LAYER_WISE,
-            OffloadStrategy.DISTRIBUTED_LAYER_WISE,
-        }:
-            raise ValueError(
-                "layerwise_offload_components requires layerwise or distributed layerwise offload to be enabled"
-            )
+        raw_components = getattr(od_config, "offload_components", None)
+        components = parse_offload_components(raw_components)
+        if raw_components is not None and strategy is OffloadStrategy.NONE:
+            raise ValueError("offload_components requires offload_strategy to select an offload policy")
         dlo_use_allgather = getattr(od_config, "dlo_use_allgather", True)
         raw_dlo_transfer = getattr(od_config, "dlo_transfer", None)
         dlo_transfers = parse_dlo_transfer(
@@ -238,7 +176,7 @@ class OffloadConfig:
             legacy_use_allgather=dlo_use_allgather,
         )
         if raw_dlo_transfer is not None and strategy != OffloadStrategy.DISTRIBUTED_LAYER_WISE:
-            raise ValueError("dlo_transfer requires distributed layerwise offload to be enabled")
+            raise ValueError("dlo_transfer requires offload_strategy='distributed-layerwise'")
         if isinstance(raw_dlo_transfer, Mapping):
             explicitly_configured = {str(component).strip().lower().replace("-", "_") for component in raw_dlo_transfer}
         elif isinstance(raw_dlo_transfer, str) and "=" in raw_dlo_transfer:
@@ -293,7 +231,7 @@ class OffloadConfig:
             raise ValueError(
                 "Distributed layerwise offload with AllGather is incompatible with "
                 "HSDP: HSDP parameters are already sharded DTensors, and the offloader "
-                "would double-shard them. Use --dlo-no-use-allgather (standard-loader "
+                "would double-shard them. Use --dlo-transfer rank-local (standard-loader "
                 "rank-local weights) or disable HSDP."
             )
 
@@ -306,6 +244,7 @@ class OffloadConfig:
             dlo_resident_layers=dlo_resident_layers,
             dlo_host_registration_limit_gib=dlo_host_registration_limit_gib,
             components=components,
+            components_explicit=raw_components is not None,
             dlo_transfers=dlo_transfers,
         )
 

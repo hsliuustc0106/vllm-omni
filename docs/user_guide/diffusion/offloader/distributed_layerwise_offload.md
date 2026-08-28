@@ -24,28 +24,40 @@ Slots:           slot 0: Layer N    slot 1: Layer N+1
 AllGather communicates only request-independent weight shards, so data-
 parallel ranks may process different requests concurrently.
 
+Offload configuration has three independent levels:
+
+| Level | Setting | Question answered |
+| --- | --- | --- |
+| Policy | `offload_strategy` | model, layerwise, or distributed-layerwise scheduling |
+| Topology | `offload_components` | which declared components may move to CPU |
+| DLO detail | `dlo_transfer`, `dlo_resident_layers` | how distributed-layerwise stages and retains selected blocks |
+
+The historical `enable_cpu_offload`, `enable_layerwise_offload`, and
+`enable_distributed_layerwise_offload` fields remain compatibility aliases.
+Conflicting strategy sources fail during configuration.
+
 ## Usage
 
 ```bash
 # Four SP ranks; Wan declares replicated text-encoder weights, so both
 # selected components can use AllGather safely.
 vllm serve Wan-AI/Wan2.2-T2V-A14B-Diffusers --omni \
-  --enable-distributed-layerwise-offload \
-  --layerwise-offload-components dit,text_encoder \
+  --offload-strategy distributed-layerwise \
+  --offload-components dit,text_encoder \
   --dlo-transfer allgather \
   --usp 4
 
 # Mix transfers independently: sharded DiT, loader-produced encoder layout
 vllm serve /path/to/model --omni \
-  --enable-distributed-layerwise-offload \
-  --layerwise-offload-components dit,text_encoder \
+  --offload-strategy distributed-layerwise \
+  --offload-components dit,text_encoder \
   --dlo-transfer dit=allgather,text_encoder=rank-local \
   --usp 4
 
 # Standard-loader rank-local weights for both components
 vllm serve /path/to/model --omni \
-  --enable-distributed-layerwise-offload \
-  --layerwise-offload-components all \
+  --offload-strategy distributed-layerwise \
+  --offload-components all \
   --dlo-transfer rank-local \
   --usp 4
 ```
@@ -55,8 +67,8 @@ from vllm_omni import Omni
 
 omni = Omni(
     model="/path/to/model",
-    enable_distributed_layerwise_offload=True,
-    layerwise_offload_components=["dit", "text_encoder"],
+    offload_strategy="distributed-layerwise",
+    offload_components=["dit", "text_encoder"],
     dlo_transfer={
         "dit": "allgather",
         "text_encoder": "rank-local",
@@ -68,8 +80,8 @@ omni = Omni(
 
 | Flag | Meaning | Default |
 | --- | --- | --- |
-| `--enable-distributed-layerwise-offload` | Enable DLO | `false` |
-| `--layerwise-offload-components LIST` | Select `dit`, `text_encoder`, or `all` | `dit` |
+| `--offload-strategy distributed-layerwise` | Select the distributed-layerwise policy | `none` |
+| `--offload-components LIST` | Select `dit`, `text_encoder`, or `all` independently of policy | `dit` |
 | `--dlo-transfer MODE_OR_MAP` | `allgather`, `rank-local`, or a component map such as `dit=allgather,text_encoder=rank-local` | `allgather` |
 | `--data-parallel-size N` | DP ranks and AllGather weight-sharding group | `1` |
 | `--dlo-use-allgather` | Legacy global alias for `--dlo-transfer allgather` | `true` |
@@ -150,7 +162,7 @@ the validated scope.
 
 ```bash
 vllm serve /path/to/model --omni \
-  --enable-distributed-layerwise-offload \
+  --offload-strategy distributed-layerwise \
   --dlo-no-use-allgather \
   --host-weight-runtime-mode preferred \
   --host-weight-runtime-root /var/cache/vllm-omni/hwr
@@ -192,14 +204,14 @@ For example:
 ```bash
 # First startup: canonically load and populate the exact artifacts.
 vllm serve /path/to/model --omni \
-  --enable-distributed-layerwise-offload \
+  --offload-strategy distributed-layerwise \
   --dlo-no-use-allgather \
   --host-weight-runtime-mode preferred \
   --host-weight-runtime-root /var/cache/vllm-omni/hwr
 
 # After a healthy startup and clean shutdown, enforce cache hits.
 vllm serve /path/to/model --omni \
-  --enable-distributed-layerwise-offload \
+  --offload-strategy distributed-layerwise \
   --dlo-no-use-allgather \
   --host-weight-runtime-mode required \
   --host-weight-runtime-root /var/cache/vllm-omni/hwr
