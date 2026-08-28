@@ -240,13 +240,10 @@ class OffloadConfig:
         if raw_dlo_transfer is not None and strategy != OffloadStrategy.DISTRIBUTED_LAYER_WISE:
             raise ValueError("dlo_transfer requires distributed layerwise offload to be enabled")
         if isinstance(raw_dlo_transfer, Mapping):
-            explicitly_configured = {
-                str(component).strip().lower().replace("-", "_") for component in raw_dlo_transfer
-            }
+            explicitly_configured = {str(component).strip().lower().replace("-", "_") for component in raw_dlo_transfer}
         elif isinstance(raw_dlo_transfer, str) and "=" in raw_dlo_transfer:
             explicitly_configured = {
-                item.partition("=")[0].strip().lower().replace("-", "_")
-                for item in raw_dlo_transfer.split(",")
+                item.partition("=")[0].strip().lower().replace("-", "_") for item in raw_dlo_transfer.split(",")
             }
         else:
             explicitly_configured = set()
@@ -288,8 +285,10 @@ class OffloadConfig:
         # HSDP already shards parameters into DTensors.  Running distributed
         # layerwise offload on top would shard each to_local() again, producing
         # incorrect reconstruction after AllGather.  Reject this combination.
-        if enable_distributed_layerwise_offload and use_hsdp and any(
-            dlo_transfers[component] is DLOTransfer.ALLGATHER for component in components
+        if (
+            enable_distributed_layerwise_offload
+            and use_hsdp
+            and any(dlo_transfers[component] is DLOTransfer.ALLGATHER for component in components)
         ):
             raise ValueError(
                 "Distributed layerwise offload with AllGather is incompatible with "

@@ -854,10 +854,7 @@ class _DiffusionConfigProjection:
         self.dlo_host_registration_limit_gib = validate_dlo_host_registration_options(
             limit_gib=self.dlo_host_registration_limit_gib,
             enable_dlo=self.enable_distributed_layerwise_offload,
-            use_allgather=(
-                DIT_COMPONENT not in selected_components
-                or component_uses_allgather(self, DIT_COMPONENT)
-            ),
+            use_allgather=(DIT_COMPONENT not in selected_components or component_uses_allgather(self, DIT_COMPONENT)),
             hwr_mode=self.host_weight_runtime_mode,
         )
 

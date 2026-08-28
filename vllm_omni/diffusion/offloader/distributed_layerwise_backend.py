@@ -2038,8 +2038,7 @@ class DistributedLayerwiseOffloadBackend(OffloadBackend):
 
         total_blocks = sum(len(b) for b in self._blocks)
         transfer_summary = ", ".join(
-            f"{component}: {self.config.transfer_for(component).value}"
-            for component in sorted(self.config.components)
+            f"{component}: {self.config.transfer_for(component).value}" for component in sorted(self.config.components)
         )
         logger.info(
             f"Distributed layer-wise offloading enabled on {total_blocks} blocks "

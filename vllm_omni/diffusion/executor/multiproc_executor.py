@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 from __future__ import annotations
 
 import concurrent.futures
@@ -472,10 +475,7 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
         # request and Diffusion KV metadata inseparable.
         # All ranks reply (unique_reply_rank=None) so we collect dp_size
         # responses and match by dp_rank.
-        if (
-            len(new_reqs) > 1
-            and any_selected_component_uses_allgather(self.od_config)
-        ):
+        if len(new_reqs) > 1 and any_selected_component_uses_allgather(self.od_config):
             # Reuse the request scheduler's complete compatibility key. DLO
             # AllGather requires every DP rank to execute the same collective
             # schedule, including shape, CFG, denoise steps, output count,
@@ -605,10 +605,7 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
 
         parallel_config = getattr(self.od_config, "parallel_config", None)
         dp_size = getattr(parallel_config, "data_parallel_size", 1)
-        if (
-            dp_size > 1
-            and any_selected_component_uses_allgather(self.od_config)
-        ):
+        if dp_size > 1 and any_selected_component_uses_allgather(self.od_config):
             # DLO DP uses one independent request per DP replica.  It is not a
             # fused pipeline request batch, so models such as MiniMax-H3 do not
             # need to advertise supports_request_batch=True.
@@ -624,6 +621,8 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
             # Propagate async_output_id to per-request RunnerOutputs so the
             # engine waits in step_streaming() instead of blocking here.
             batch_id = result.async_output_id
+            if batch_id is None:
+                raise RuntimeError("COMPUTE_DONE output is missing async_output_id")
             per_req_map: dict[str, str] = {}
             runner_outputs: list[RunnerOutput] = []
             for new_req in scheduler_output.scheduled_new_reqs:
@@ -902,14 +901,26 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
                                 if exc is not None:
                                     try_set_exception(pending, exc)
                                 else:
-                                    try_set_result(pending, output_result)
+                                    resolved_output = (
+                                        output_result
+                                        if output_result is not None
+                                        else DiffusionOutput(error="Async output completed without a diffusion result")
+                                    )
+                                    try_set_result(pending, resolved_output)
                             else:
-                                fut = concurrent.futures.Future()
+                                completed_future: concurrent.futures.Future[DiffusionOutput] = (
+                                    concurrent.futures.Future()
+                                )
                                 if exc is not None:
-                                    fut.set_exception(exc)
+                                    completed_future.set_exception(exc)
                                 else:
-                                    fut.set_result(output_result)
-                                self._completed_outputs[batch_id] = fut
+                                    resolved_output = (
+                                        output_result
+                                        if output_result is not None
+                                        else DiffusionOutput(error="Async output completed without a diffusion result")
+                                    )
+                                    completed_future.set_result(resolved_output)
+                                self._completed_outputs[batch_id] = completed_future
 
     def _deliver_batch_split(
         self,
@@ -994,12 +1005,12 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
             self._result_mqs = []
             self._result_pump_threads = []
             with self._futures_lock:
-                for fut in self._rpc_futures.values():
-                    if not fut.done():
-                        try_set_exception(fut, RuntimeError("Executor shut down"))
-                for fut in self._output_futures.values():
-                    if not fut.done():
-                        try_set_exception(fut, RuntimeError("Executor shut down"))
+                for rpc_future in self._rpc_futures.values():
+                    if not rpc_future.done():
+                        try_set_exception(rpc_future, RuntimeError("Executor shut down"))
+                for output_future in self._output_futures.values():
+                    if not output_future.done():
+                        try_set_exception(output_future, RuntimeError("Executor shut down"))
                 self._rpc_futures.clear()
                 self._output_futures.clear()
                 self._batch_split_map.clear()

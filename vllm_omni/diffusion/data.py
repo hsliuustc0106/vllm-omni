@@ -1203,10 +1203,7 @@ class OmniDiffusionConfig:
             # Registration is a DiT host-storage optimization. Treat an
             # encoder-only selection as ineligible rather than accepting a
             # budget that no loader path will consume.
-            use_allgather=(
-                DIT_COMPONENT not in selected_components
-                or component_uses_allgather(self, DIT_COMPONENT)
-            ),
+            use_allgather=(DIT_COMPONENT not in selected_components or component_uses_allgather(self, DIT_COMPONENT)),
             hwr_mode=self.host_weight_runtime_mode,
         )
 

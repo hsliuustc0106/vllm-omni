@@ -2531,9 +2531,7 @@ class TestDistributedComponentSelection:
 
         backend.enable(pipeline)
 
-        encoder_hook = pipeline.text_encoder.encoder.block[0]._hook_registry.get_hook(
-            "distributed_layerwise_offload"
-        )
+        encoder_hook = pipeline.text_encoder.encoder.block[0]._hook_registry.get_hook("distributed_layerwise_offload")
         dit_hook = pipeline.transformer.blocks[0]._hook_registry.get_hook("distributed_layerwise_offload")
         assert encoder_hook.dp_size == 2
         assert dit_hook.dp_size == 1

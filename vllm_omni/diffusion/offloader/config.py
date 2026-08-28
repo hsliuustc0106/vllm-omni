@@ -56,20 +56,14 @@ def parse_dlo_transfer(
             return {component: transfer for component in DLO_COMPONENTS}
         entries: list[tuple[str, str]] = []
         for item in raw.split(","):
-            key, separator, transfer = item.partition("=")
-            if not separator or not key.strip() or not transfer.strip():
-                raise ValueError(
-                    "dlo_transfer must be a transfer name or a comma-separated "
-                    "component=transfer map"
-                )
-            entries.append((key, transfer))
+            key, separator, raw_mode = item.partition("=")
+            if not separator or not key.strip() or not raw_mode.strip():
+                raise ValueError("dlo_transfer must be a transfer name or a comma-separated component=transfer map")
+            entries.append((key, raw_mode))
     elif isinstance(value, Mapping):
         entries = list(value.items())
     else:
-        raise TypeError(
-            "dlo_transfer must be a transfer string or component mapping, "
-            f"got {type(value).__name__}"
-        )
+        raise TypeError(f"dlo_transfer must be a transfer string or component mapping, got {type(value).__name__}")
 
     seen: set[str] = set()
     for raw_component, raw_transfer in entries:
@@ -77,7 +71,7 @@ def parse_dlo_transfer(
             raise TypeError("dlo_transfer component names must be strings")
         component = raw_component.strip().lower().replace("-", "_")
         if component == "all":
-            targets = DLO_COMPONENTS
+            targets = tuple(DLO_COMPONENTS)
         elif component in DLO_COMPONENTS:
             targets = (component,)
         else:

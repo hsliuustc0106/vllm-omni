@@ -286,7 +286,7 @@ class DiffusersPipelineLoader(HWRLoaderMixin):
                 ignore_patterns=self.load_config.ignore_patterns,
             )
         else:
-            hf_folder = model_name_or_path
+            hf_folder = str(model_name_or_path)
 
         if subfolder is not None:
             hf_folder = os.path.join(hf_folder, subfolder)
@@ -362,8 +362,9 @@ class DiffusersPipelineLoader(HWRLoaderMixin):
 
     def _get_source_quant_config(self, source: "ComponentSource") -> object | None:
         quant_config = self.quant_config
-        if hasattr(quant_config, "resolve"):
-            return quant_config.resolve(source.prefix.rstrip("."))
+        resolve = getattr(quant_config, "resolve", None)
+        if callable(resolve):
+            return resolve(source.prefix.rstrip("."))
         return quant_config
 
     def _get_checkpoint_adapter(
@@ -570,19 +571,19 @@ class DiffusersPipelineLoader(HWRLoaderMixin):
                     )
                     self.host_weight_plan = plan_result.plan
 
-                _skip_load = self.host_weight_plan is not None
+                host_weight_plan = self.host_weight_plan
 
-                if _skip_load:
+                if host_weight_plan is not None:
                     logger.info(
                         "DLO host-weight plan active (%s, %s): skipping ordinary materialization for %s",
                         "AllGather" if _use_ag and _dlo_group_size > 1 else "rank-local",
-                        self.host_weight_plan.backing_kind,
-                        sorted(self.host_weight_plan.planned_source_prefixes) or "legacy DiT sources",
+                        host_weight_plan.backing_kind,
+                        sorted(host_weight_plan.planned_source_prefixes) or "legacy DiT sources",
                     )
                     ordinary_sources = tuple(
                         source
                         for source in weight_sources
-                        if source.prefix not in self.host_weight_plan.planned_source_prefixes
+                        if source.prefix not in host_weight_plan.planned_source_prefixes
                     )
                     if ordinary_sources:
                         logger.info(
@@ -592,7 +593,7 @@ class DiffusersPipelineLoader(HWRLoaderMixin):
                         self.load_weights(
                             model,
                             sources=ordinary_sources,
-                            planned_weights=self.host_weight_plan.bindings,
+                            planned_weights=host_weight_plan.bindings,
                         )
                 else:
                     if _dist_offload and _use_ag and _has_online_quant:
@@ -686,8 +687,9 @@ class DiffusersPipelineLoader(HWRLoaderMixin):
         marked = 0
         for module in model.modules():
             quant_method = getattr(module, "quant_method", None)
-            if getattr(quant_method, "supports_offload_after_quant", False):
-                quant_method.enable_offload_after_quant()
+            enable_offload = getattr(quant_method, "enable_offload_after_quant", None)
+            if getattr(quant_method, "supports_offload_after_quant", False) and callable(enable_offload):
+                enable_offload()
                 marked += 1
         return marked
 
