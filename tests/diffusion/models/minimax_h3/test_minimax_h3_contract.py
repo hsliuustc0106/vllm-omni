@@ -262,14 +262,16 @@ def test_combined_task_inference_and_transformer_routing():
         "component_partition",
         "source_partitions",
         "expected_tasks",
+        "load_text_encoder",
     ),
     [
-        (None, "combined", 2, "FL2VA", ["FL2VA", "Ref2VA"], {"t2va", "fl2va", "ref2va"}),
-        ("fl2va", "fl2va", 1, "FL2VA", ["FL2VA"], {"t2va", "fl2va"}),
-        ("ref2va", "ref2va", 1, "Ref2VA", ["Ref2VA"], {"ref2va"}),
+        (None, "combined", 2, "FL2VA", ["FL2VA", "Ref2VA"], {"t2va", "fl2va", "ref2va"}, True),
+        ("fl2va", "fl2va", 1, "FL2VA", ["FL2VA"], {"t2va", "fl2va"}, True),
+        ("ref2va", "ref2va", 1, "Ref2VA", ["Ref2VA"], {"ref2va"}, True),
+        ("fl2va", "fl2va", 1, "FL2VA", ["FL2VA"], {"t2va", "fl2va"}, False),
     ],
 )
-def test_pipeline_loads_task_selected_dits_and_shared_components_once(
+def test_pipeline_loads_task_selected_components_with_encoder_ownership(
     monkeypatch,
     tmp_path,
     task_type,
@@ -278,6 +280,7 @@ def test_pipeline_loads_task_selected_dits_and_shared_components_once(
     component_partition,
     source_partitions,
     expected_tasks,
+    load_text_encoder,
 ):
     from vllm_omni.diffusion.data import (
         DiffusionParallelConfig,
@@ -389,6 +392,11 @@ def test_pipeline_loads_task_selected_dits_and_shared_components_once(
         revision=None,
         task_type=task_type,
         quantization_config=None,
+        model_loaded={
+            "transformer": True,
+            "vae": True,
+            "text_encoder": load_text_encoder,
+        },
         parallel_config=DiffusionParallelConfig(
             cfg_parallel_size=1,
             text_encoder_tp_size=1,
@@ -400,34 +408,54 @@ def test_pipeline_loads_task_selected_dits_and_shared_components_once(
     assert pipeline.supported_tasks == expected_tasks
     assert len(created["dit"]) == expected_dits
     component_path = tmp_path / component_partition
-    assert created["text_encoder"] == [str(component_path / "text_encoder")]
     assert created["video_vae"] == [str(component_path / "video_vae")]
     assert created["audio_vae"] == [str(component_path / "audio_vae")]
-    assert len(tokenizer_calls) == 1
-    assert len(processor_calls) == 1
     expected_dit_modules = ["transformer", "transformers_ref"] if expected_dits == 2 else ["transformer"]
     assert pipeline._dit_modules == expected_dit_modules
     assert hasattr(pipeline, "transformers_ref") is (expected_dits == 2)
+    if load_text_encoder:
+        assert created["text_encoder"] == [str(component_path / "text_encoder")]
+        assert len(tokenizer_calls) == 1
+        assert len(processor_calls) == 1
+        assert pipeline.text_encoder is not None
+        assert pipeline.tokenizer is not None
+        assert pipeline.processor is not None
+        assert pipeline._encoder_modules == ["text_encoder"]
+        assert pipeline.text_encoder_tp_size == 1
+    else:
+        assert created["text_encoder"] == []
+        assert tokenizer_calls == []
+        assert processor_calls == []
+        assert pipeline.text_encoder is None
+        assert pipeline.tokenizer is None
+        assert pipeline.processor is None
+        assert pipeline._encoder_modules == []
+        assert pipeline.text_encoder_tp_size == 0
+        assert pipeline.text_encoder_group is None
     if expected_partition == "ref2va":
         assert pipeline._transformer_for_task("ref2va") is pipeline.transformer
     assert [source.model_or_path for source in pipeline.weights_sources] == [
         *(str(tmp_path / partition_name) for partition_name in source_partitions),
-        str(component_path),
+        *((str(component_path),) if load_text_encoder else ()),
     ]
     assert [source.subfolder for source in pipeline.weights_sources] == [
         *("transformer" for _ in source_partitions),
-        "text_encoder",
+        *(("text_encoder",) if load_text_encoder else ()),
     ]
     expected_prefixes = ["transformer."]
     if expected_dits == 2:
         expected_prefixes.append("transformers_ref.")
-    expected_prefixes.append("text_encoder.")
+    if load_text_encoder:
+        expected_prefixes.append("text_encoder.")
     assert [source.prefix for source in pipeline.weights_sources] == expected_prefixes
-    expected_patterns = (
-        pipeline_module.MINIMAX_H3_DOWNLOAD_PATTERNS
-        if expected_partition == "combined"
-        else pipeline_module.MINIMAX_H3_TASK_DOWNLOAD_PATTERNS[expected_partition]
-    )
+    if load_text_encoder:
+        expected_patterns = (
+            pipeline_module.MINIMAX_H3_DOWNLOAD_PATTERNS
+            if expected_partition == "combined"
+            else pipeline_module.MINIMAX_H3_TASK_DOWNLOAD_PATTERNS[expected_partition]
+        )
+    else:
+        expected_patterns = pipeline_module.MINIMAX_H3_DIFFUSION_DOWNLOAD_PATTERNS[expected_partition]
     assert download_calls == [
         {
             "model_name_or_path": "MiniMaxAI/MiniMax-H3",
