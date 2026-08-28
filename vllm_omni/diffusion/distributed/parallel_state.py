@@ -59,6 +59,7 @@ _SP: SequenceParallelGroupCoordinator | None = None
 _PP: PipelineGroupCoordinator | None = None
 _CFG: GroupCoordinator | None = None
 _DP: GroupCoordinator | None = None
+_FS: GroupCoordinator | None = None  # Fully Sharded (HSDP shard dimension)
 
 # Rank-layout metadata for expert parallelism. This is not a process group;
 # it is reused by platform-specific runtimes that must build companion groups
@@ -350,6 +351,12 @@ def get_data_parallel_rank():
     return get_dp_group().rank_in_group
 
 
+# FS (Fully Shard / HSDP shard dimension)
+def get_fs_group() -> GroupCoordinator:
+    assert _FS is not None, "fully shard group is not initialized"
+    return _FS
+
+
 def is_dp_last_group():
     """Return True if in the last data parallel group, False otherwise."""
     return (
@@ -445,6 +452,7 @@ def init_model_parallel_group(
         "expert",
         "sequence",
         "classifier_free_guidance",
+        "fully_shard",
     ], f"parallel_mode {parallel_mode} is not supported"
     if parallel_mode == "pipeline":
         return PipelineGroupCoordinator(
@@ -679,6 +687,7 @@ def _initialize_model_parallel(
     allgather_degree: int = 1,
     tensor_parallel_size: int = 1,
     pipeline_parallel_size: int = 1,
+    fully_shard_degree: int = 1,
     enable_expert_parallel: bool = False,
     use_hsdp: bool = False,
     backend: str | None = None,
@@ -700,6 +709,7 @@ def _initialize_model_parallel(
             (causal=False only). Mutually exclusive with ulysses/ring in v1.
         tensor_parallel_size: number of GPUs used for tensor parallelism.
         pipeline_parallel_size: number of GPUs used for pipeline parallelism.
+        fully_shard_degree: number of GPUs used for fully sharded data parallelism (HSDP shard dimension).
         backend: distributed backend of pytorch collective comm.
 
     Let's say we have a total of 16 GPUs denoted by g0 ... g15 and we
@@ -881,6 +891,28 @@ def _initialize_model_parallel(
             group_name="dp",
         )
 
+    global _FS
+    assert _FS is None, "fully shard group is already initialized"
+    if fully_shard_degree > 1:
+        if world_size % fully_shard_degree != 0:
+            raise ValueError(
+                f"WORLD size ({world_size}) must be divisible by fully_shard_degree ({fully_shard_degree})"
+            )
+        # FS groups are consecutive rank runs so that the layout matches the
+        # FSDP2 mesh built by hsdp._create_hsdp_mesh (arange(world).reshape(
+        # replicate, shard): each row is one shard group).
+        fs_group_ranks = [
+            list(range(start, start + fully_shard_degree)) for start in range(0, world_size, fully_shard_degree)
+        ]
+    else:
+        fs_group_ranks = [[rank] for rank in range(world_size)]
+    _FS = init_model_parallel_group(
+        group_ranks=fs_group_ranks,
+        local_rank=get_world_group().local_rank,
+        backend=backend,
+        parallel_mode="fully_shard",
+    )
+
     global _EXPERT_PARALLEL_GROUP_RANKS
     _EXPERT_PARALLEL_GROUP_RANKS = get_rank_groups("tp-sp-cfg-dp")
     if use_moe_parallel_mapping:
@@ -902,6 +934,7 @@ def initialize_model_parallel(
     allgather_degree: int = 1,
     tensor_parallel_size: int = 1,
     pipeline_parallel_size: int = 1,
+    fully_shard_degree: int = 1,
     enable_expert_parallel: bool = False,
     use_hsdp: bool = False,
     backend: str | None = None,
@@ -916,6 +949,7 @@ def initialize_model_parallel(
         "cfg": _CFG,
         "sp": _SP,
         "pp": _PP,
+        "fs": _FS,
         "vllm_tp": vllm_parallel_state._TP,
         "vllm_dp": vllm_parallel_state._DP,
         "vllm_pp": vllm_parallel_state._PP,
@@ -937,6 +971,7 @@ def initialize_model_parallel(
             allgather_degree=allgather_degree,
             tensor_parallel_size=tensor_parallel_size,
             pipeline_parallel_size=pipeline_parallel_size,
+            fully_shard_degree=fully_shard_degree,
             enable_expert_parallel=enable_expert_parallel,
             use_hsdp=use_hsdp,
             backend=backend,
@@ -948,7 +983,7 @@ def initialize_model_parallel(
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
-    global _DP, _CFG, _SP, _PP, _EXPERT_PARALLEL_GROUP_RANKS
+    global _DP, _CFG, _SP, _PP, _FS, _EXPERT_PARALLEL_GROUP_RANKS
 
     if vllm_parallel_state._DP and vllm_parallel_state._DP is not _DP:
         vllm_parallel_state._DP.destroy()
@@ -957,6 +992,10 @@ def destroy_model_parallel():
     if _DP:
         _DP.destroy()
     _DP = None
+
+    if _FS:
+        _FS.destroy()
+    _FS = None
 
     if _CFG:
         _CFG.destroy()
