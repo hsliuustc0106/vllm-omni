@@ -2567,8 +2567,11 @@ class MiniMaxH3Pipeline(
         # attention features. Requests can differ in both step index and sigma
         # schedule, so a batch that is not at one single point has nothing to
         # publish and those gates stay dense -- which is their safe default.
-        progress = {(state.step_index, schedule["sigma_video"]) for state, schedule in zip(batch_states, schedules)}
-        minimax_h3_publish_denoise_progress(*(progress.pop() if len(progress) == 1 else (None, None)))
+        progress = {
+            (state.step_index, schedule["sigma_video"], len(state.extra[_STEP_SIGMAS_VIDEO]) - 1)
+            for state, schedule in zip(batch_states, schedules)
+        }
+        minimax_h3_publish_denoise_progress(*(progress.pop() if len(progress) == 1 else (None, None, None)))
 
         if len(batch_states) > 1 and (mixed_transformers or not self._packed_batch_supported(transformers[0])):
             if mixed_transformers:

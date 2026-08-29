@@ -19,6 +19,7 @@ from vllm_omni.diffusion.attention.backends.abstract import VideoTokenLayout, Vi
 from vllm_omni.diffusion.forward_context import (
     set_forward_context_denoise_step_idx,
     set_forward_context_denoise_timestep,
+    set_forward_context_denoise_total_steps,
 )
 from vllm_omni.platforms import current_omni_platform
 
@@ -36,15 +37,19 @@ MINIMAX_H3_VIDEO_ROW_WIDTH = 96
 MINIMAX_H3_AUDIO_ROW_WIDTH = 32
 
 
-def minimax_h3_publish_denoise_progress(step: int | None, sigma_video: float | None) -> None:
+def minimax_h3_publish_denoise_progress(
+    step: int | None, sigma_video: float | None, total_steps: int | None = None
+) -> None:
     """Publish denoise progress for step-gated attention features.
 
-    Both execution modes must publish the same pair: the step index drives the
-    dense warmup of RAINFUSION_ATTN, and the normalized descending timestep
-    drives the TRTLLM_ATTN skip gate, which stays dense while it is unset.
+    Both execution modes must publish the same trio: the step index drives the
+    dense warmup of RAINFUSION_ATTN, the normalized descending timestep
+    drives the TRTLLM_ATTN skip gate (which stays dense while it is unset),
+    and the total step count enables the ``end_step`` tail fallback.
     """
     set_forward_context_denoise_step_idx(step)
     set_forward_context_denoise_timestep(sigma_video)
+    set_forward_context_denoise_total_steps(total_steps)
 
 
 class MiniMaxH3DenoiseBranch:
@@ -297,7 +302,7 @@ def minimax_h3_denoise_loop(
             # warmup of RAINFUSION_ATTN, the timestep gate of TRTLLM_ATTN) can
             # see it. Gates use the scheduler-style descending timestep, which
             # for a rectified-flow schedule is the video sigma.
-            minimax_h3_publish_denoise_progress(step, s_v)
+            minimax_h3_publish_denoise_progress(step, s_v, num_steps)
             t_v, t_a = 1.0 - s_v, 1.0 - s_a
             imgvid_cond_t = max(t_v, float(imgvid_cond_noise_aug_for_inference))
             audio_ref_cond_t = max(t_a, float(audio_cond_noise_aug_for_inference))
@@ -341,7 +346,7 @@ def minimax_h3_denoise_loop(
             if on_step is not None:
                 on_step(step, video_rows, audio_rows)
 
-    minimax_h3_publish_denoise_progress(None, None)
+    minimax_h3_publish_denoise_progress(None, None, None)
     return video_rows, audio_rows
 
 
