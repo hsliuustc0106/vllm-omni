@@ -4022,6 +4022,55 @@ async def test_duplex_chat_audio_stream_uses_output_audio_delta_event():
 
 
 @pytest.mark.asyncio
+async def test_duplex_chat_stage_metrics_use_latest_streaming_snapshot():
+    class SnapshotChatService(FakeChatService):
+        async def create_chat_completion(self, request, raw_request=None):
+            del raw_request
+            self.seen_request_ids.append(request.request_id)
+            snapshots = [
+                {"num_tokens_out": 1, "vllm_tpot_ms": 0.0, "vllm_itls_ms": []},
+                {"num_tokens_out": 2, "vllm_tpot_ms": 10.0, "vllm_itls_ms": [10.0]},
+                {"num_tokens_out": 3, "vllm_tpot_ms": 11.0, "vllm_itls_ms": [10.0, 12.0]},
+            ]
+
+            async def generate():
+                for index, snapshot in enumerate(snapshots):
+                    payload = {
+                        "modality": "audio",
+                        "choices": [{"delta": {"content": f"audio-{index}"}}],
+                        "metrics": {"stage_metrics": {"0": snapshot}},
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+
+            return generate()
+
+    handler = OmniDuplexSessionHandler(
+        chat_service=SnapshotChatService(FakeEngineClient()),
+        config_timeout_s=0.1,
+        idle_timeout_s=1,
+    )
+    session = DuplexSession(
+        session_id="sid-chat-snapshots",
+        config=DuplexSessionConfig(instructions="speak"),
+    )
+    sent: list[dict[str, Any]] = []
+
+    async def send_json(data: dict[str, Any]) -> None:
+        sent.append(data)
+
+    await handler._run_response(session, send_json)
+
+    audio_deltas = [event for event in sent if event.get("type") == "response.output_audio.delta"]
+    done = next(event for event in sent if event.get("type") == "response.done")
+    assert all("vllm_omni" not in event for event in audio_deltas)
+    assert done["vllm_omni"]["stage_metrics"]["0"] == {
+        "num_tokens_out": 3,
+        "vllm_tpot_ms": 11.0,
+        "vllm_itls_ms": [10.0, 12.0],
+    }
+
+
+@pytest.mark.asyncio
 async def test_duplex_chat_rejects_unknown_output_modality():
     handler = OmniDuplexSessionHandler(
         chat_service=FakeChatService(FakeEngineClient()),
