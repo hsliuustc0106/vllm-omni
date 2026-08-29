@@ -149,6 +149,7 @@ class OmniSchedulerMixin:
 
     def _replace_streaming_session(self, session: Request, update: StreamingUpdate) -> None:
         """Replace a downstream stage's placeholder with its next payload."""
+        session._omni_segment_generation = int(getattr(session, "_omni_segment_generation", 0) or 0) + 1
         adapter = getattr(self, "chunk_transfer_adapter", None)
         if adapter is not None:
             adapter.segment_finished_requests.discard(session.request_id)
@@ -703,6 +704,7 @@ class OmniSchedulerMixin:
         )
         finished = super().finish_requests(request_ids, finished_status)
         self._purge_finished_from_running(target_request_ids)
+        self._resync_streaming_input_counter()
 
         for request in finished:
             self._free_input_coordinator_request(request.request_id)
@@ -868,3 +870,25 @@ class OmniSchedulerMixin:
             return resumable_segment_stop and req.request_id not in target_request_ids
 
         self.running[:] = [req for req in self.running if keep_running(req)]
+
+    def _drop_aborted_queued_requests(self) -> None:
+        for queue in (self.waiting, self.skipped_waiting):
+            aborted = [req for req in queue if req.status == RequestStatus.FINISHED_ABORTED]
+            if aborted:
+                queue.remove_requests(aborted)
+        self.running[:] = [req for req in self.running if req.status != RequestStatus.FINISHED_ABORTED]
+
+    def _resync_streaming_input_counter(self) -> None:
+        counter = getattr(self, "num_waiting_for_streaming_input", None)
+        if counter is None:
+            return
+        parked = sum(
+            1
+            for queue in (getattr(self, "waiting", None), getattr(self, "skipped_waiting", None))
+            if queue
+            for request in queue
+            if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+        )
+        if parked != counter:
+            logger.debug("[Omni] resynced streaming-input counter %s -> %s", counter, parked)
+            self.num_waiting_for_streaming_input = parked

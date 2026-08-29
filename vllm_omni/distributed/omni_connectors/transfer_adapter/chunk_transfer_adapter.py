@@ -170,6 +170,9 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         #   been read").
         self._held_non_active: deque[Any] = deque()
         self.requests_num_chunks_sent: dict[str, int] = defaultdict(int)
+        # Boundary tasks advance this before the background sender runs, so a
+        # late old-segment frame cannot restore the previous watermark.
+        self._segment_generation: dict[str, int] = defaultdict(int)
         self._pending_streaming_prefills: dict[str, dict] = {}
         # The recv thread only records AR payloads. Prompt mutation is finalized
         # by the scheduler after it observes the ready marker, where the request
@@ -309,6 +312,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         is_segment_finished: bool = False,
         new_token_ids: Iterable[int] | None = None,
         confirmed_num_computed_tokens: int | None = None,
+        segment_generation: int | None = None,
     ):
         """Build and enqueue one chunk for asynchronous sending.
 
@@ -330,9 +334,32 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                 scheduler step, before resumable cleanup mutates the request
             confirmed_num_computed_tokens: committed token count captured
                 before a streaming transition can mutate ``request``
+            segment_generation: generation captured before a resumable stop
+                can apply a queued update to the mutable request
         """
         is_finished = request.is_finished() and not request.resumable
+        if not hasattr(self, "_segment_generation"):
+            self._segment_generation = defaultdict(int)
         external_req_id = request.external_req_id
+        if segment_generation is None:
+            raw_generation = getattr(request, "_omni_segment_generation", 0)
+            try:
+                generation = int(raw_generation)
+            except (TypeError, ValueError):
+                generation = 0
+        else:
+            generation = int(segment_generation)
+        expected_generation = self._segment_generation.get(external_req_id, generation)
+        if generation < expected_generation:
+            logger.warning(
+                "Skip late save_async for request %s, segment_generation=%s, expected=%s",
+                external_req_id,
+                generation,
+                expected_generation,
+            )
+            return
+        self._segment_generation[external_req_id] = generation
+
         if confirmed_num_computed_tokens is None:
             confirmed_num_computed_tokens = self._confirmed_num_computed_tokens(request)
         processor_request = (
@@ -344,6 +371,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
             "is_finished": is_finished,
             "is_segment_finished": is_segment_finished,
             "new_token_ids": tuple(int(token_id) for token_id in (new_token_ids or ())),
+            "segment_generation": generation,
         }
 
         reject_reason = None
@@ -352,7 +380,9 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
             if sender_token is not None and sender_token.cancelled:
                 reject_reason = "previous sender generation is still draining"
             # If the request is preempted, skip the already saved chunks.
-            elif confirmed_num_computed_tokens < self.requests_num_chunks_sent.get(external_req_id, 0):
+            elif not is_segment_finished and confirmed_num_computed_tokens < self.requests_num_chunks_sent.get(
+                external_req_id, 0
+            ):
                 logger.warning(
                     f"Enqueue save_async for request {external_req_id}, "
                     f"request.num_computed_tokens={request.num_computed_tokens}, "
@@ -371,6 +401,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                 if is_segment_finished:
                     # The queued FIFO item now owns the old segment. Start the next
                     # segment's deduplication watermark before the worker sends it.
+                    self._segment_generation[external_req_id] = generation + 1
                     self.requests_num_chunks_sent.pop(external_req_id, None)
         if reject_reason is not None:
             logger.error("Cannot enqueue %s: %s", external_req_id, reject_reason)
@@ -822,6 +853,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         self.request_payload.pop(external_req_id, None)
         self.code_prompt_token_ids.pop(external_req_id, None)
         self.requests_num_chunks_sent.pop(external_req_id, None)
+        self._segment_generation.pop(external_req_id, None)
         self.ramp_chunk_count.pop(external_req_id, None)
         self._adaptive_states.pop(external_req_id, None)
         self._pending_streaming_prefills.pop(external_req_id, None)
