@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 from __future__ import annotations
 
 import math
@@ -260,9 +263,29 @@ class OmniSchedulerMixin:
                 self.running,
                 scheduler_requests=self.requests,
             )
+            # Prompt-window contracts are finalized on this scheduler thread
+            # and may surface a permanent receive failure.
+            self._process_chunk_receive_failures()
             self._reset_ready_async_chunk_replacements()
             self._process_pending_chunk_timeouts()
             self._log_failed_chunk_sends()
+
+    def _process_chunk_receive_failures(self) -> None:
+        """Fail requests whose consumed async chunk violated its contract."""
+        adapter = getattr(self, "chunk_transfer_adapter", None)
+        collector = getattr(adapter, "collect_failed_receive_request_ids", None)
+        if collector is None:
+            return
+        failures = collector()
+        present_ids = {request_id for request_id in failures if request_id in self.requests}
+        if not present_ids:
+            return
+        logger.error(
+            "Marking %d request(s) as FINISHED_ERROR after invalid connector input: %s",
+            len(present_ids),
+            {request_id: failures[request_id] for request_id in sorted(present_ids)},
+        )
+        self.finish_requests(present_ids, RequestStatus.FINISHED_ERROR)
 
     def _restore_omni_wait_queues(self) -> None:
         """Restore requests temporarily parked by Omni input gates."""
