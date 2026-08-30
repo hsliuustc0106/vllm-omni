@@ -548,6 +548,7 @@ class OrchestratorArgs:
     diffusers_call_kwargs: str = "{}"
     ulysses_degree: int | None = None
     ulysses_mode: str = "strict"
+    ulysses_a2a_permute: bool | None = None
     ring_degree: int | None = None
     allgather_degree: int | None = None
     diffusion_quantization_config: str | None = None

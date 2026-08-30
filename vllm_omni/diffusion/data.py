@@ -223,6 +223,9 @@ class DiffusionParallelConfig:
       sequence shapes across the ring group.
     """
 
+    ulysses_a2a_permute: bool = False
+    """Use fused permute-free all-to-all for eligible strict Ulysses exchanges."""
+
     cfg_parallel_size: int = 1
     """Number of ranks used to execute guidance passes in parallel."""
 

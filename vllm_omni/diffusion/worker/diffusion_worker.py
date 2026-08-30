@@ -13,6 +13,7 @@ import multiprocessing as mp
 import os
 import queue
 import signal
+import sys
 import threading
 import traceback
 import uuid
@@ -964,7 +965,14 @@ class DiffusionWorker:
                     if mgr is not None:
                         mgr.shutdown_prefetch()
         finally:
-            destroy_distributed_env()
+            try:
+                a2a_permute = sys.modules.get("vllm_omni.diffusion.distributed.a2a_permute")
+                if a2a_permute is not None:
+                    a2a_permute.clear_a2a_permute_workspaces()
+            except Exception:
+                logger.exception("Failed to release fused Ulysses symmetric-memory workspaces")
+            finally:
+                destroy_distributed_env()
 
 
 class CustomPipelineWorkerExtension:
