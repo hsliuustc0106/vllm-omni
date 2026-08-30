@@ -57,7 +57,8 @@ def test_h3_prepares_resolved_cache_state_immediately_before_denoise():
         return torch.zeros(1), torch.zeros(1)
 
     pipeline.diffuse = diffuse
-    pipeline.decode = Mock(return_value=(torch.zeros(1), torch.zeros(1)))
+    decoded_audio = torch.zeros(1)
+    pipeline.decode = Mock(return_value=(torch.zeros(1, 3, 1, 1, 1), decoded_audio))
     sampling = OmniDiffusionSamplingParams(
         quality="high",
         width=1344,
@@ -86,7 +87,9 @@ def test_h3_prepares_resolved_cache_state_immediately_before_denoise():
         num_inference_steps=50,
         extra_args={"task": "t2va", "aspect_ratio": "16:9"},
     )
-    assert output.output == pipeline.decode.return_value
+    assert output.output[0].shape == (1, 1, 1, 1, 3)
+    assert output.output[0].dtype == torch.uint8
+    assert output.output[1] is decoded_audio
 
 
 def test_pipeline_import_registry_and_component_discovery():
@@ -505,6 +508,26 @@ def test_joint_postprocess_is_multiprocessing_picklable():
     assert result["fps"] == 24
 
 
+def test_joint_video_output_is_quantized_before_transfer():
+    from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import (
+        _minimax_h3_post_process,
+        _prepare_minimax_h3_video_output,
+    )
+
+    video = torch.linspace(-0.1, 1.1, 2 * 3 * 2 * 4 * 5, dtype=torch.float64).reshape(2, 3, 2, 4, 5)
+    expected = torch.round(video.float().clamp(0, 1) * 255).to(torch.uint8).permute(0, 2, 3, 4, 1)
+    prepared = _prepare_minimax_h3_video_output(video)
+
+    assert prepared.dtype == torch.uint8
+    assert prepared.is_contiguous()
+    assert prepared.shape == (2, 2, 4, 5, 3)
+    torch.testing.assert_close(prepared, expected, rtol=0, atol=0)
+
+    result = _minimax_h3_post_process((prepared, torch.zeros(1, 2, 6)))
+    assert result["video"][0].dtype == np.uint8
+    np.testing.assert_array_equal(result["video"][0], expected[0].numpy())
+
+
 def test_cfg_parallel_is_rejected_for_distilled_checkpoint():
     from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
 
@@ -627,7 +650,7 @@ def _distilled_pipeline(diffuse_calls, base_schedule_by_partition):
         return torch.zeros(1), torch.zeros(1)
 
     pipeline.diffuse = diffuse
-    pipeline.decode = Mock(return_value=(torch.zeros(1), torch.zeros(1)))
+    pipeline.decode = Mock(return_value=(torch.zeros(1, 3, 1, 1, 1), torch.zeros(1)))
     return pipeline
 
 

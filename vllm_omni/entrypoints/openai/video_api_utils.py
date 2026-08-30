@@ -553,6 +553,14 @@ def _coerce_prepared_video_to_uint8_frames(
 
 def _coerce_video_to_uint8_frames(video: Any) -> np.ndarray:
     """Convert a video payload into contiguous uint8 frames shaped (F, H, W, 3)."""
+    if (
+        isinstance(video, np.ndarray)
+        and video.dtype == np.uint8
+        and video.ndim == 4
+        and video.shape[-1] == 3
+        and video.flags.c_contiguous
+    ):
+        return video
     frames, frame_shape, common_dtype = _prepare_video_frames(video)
     return _coerce_prepared_video_to_uint8_frames(frames, frame_shape, common_dtype)
 

@@ -223,6 +223,19 @@ def test_channel_first_video_tensor_is_converted_to_channel_last():
     np.testing.assert_array_equal(frames, video.permute(1, 2, 3, 0).numpy())
 
 
+def test_contiguous_uint8_video_reaches_mux_without_conversion(monkeypatch):
+    video = np.arange(2 * 4 * 5 * 3, dtype=np.uint8).reshape(2, 4, 5, 3)
+
+    def fail_prepare(*args, **kwargs):
+        raise AssertionError("ready-to-encode uint8 video must not be normalized")
+
+    monkeypatch.setattr(video_api_utils, "_prepare_video_frames", fail_prepare)
+
+    frames = video_api_utils._coerce_video_to_uint8_frames(video)
+
+    assert frames is video
+
+
 def test_channel_first_video_tensor_uses_direct_planar_mux(monkeypatch):
     calls = []
 
