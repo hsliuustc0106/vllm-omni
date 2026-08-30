@@ -399,12 +399,20 @@ def test_initialize_local_diffusion_replica_restores_device_visibility_after_loc
             os.environ[env_var] = old_env
 
 
-def test_initialize_local_diffusion_replica_passes_stage_init_timeout_and_inline_flag(monkeypatch):
+@pytest.mark.parametrize(
+    ("num_stages", "expected_inline"),
+    [(1, True), (2, False)],
+)
+def test_initialize_local_diffusion_replica_passes_stage_init_timeout_and_inline_flag(
+    monkeypatch,
+    num_stages,
+    expected_inline,
+):
     import vllm_omni.engine.stage_runtime as runtime_mod
     from vllm_omni.engine.stage_engine_startup import StageReplicaResources
 
     runtime = StageRuntime(
-        stage_configs=[types.SimpleNamespace()],
+        stage_configs=[types.SimpleNamespace()] * num_stages,
         model="dummy-model",
         config_path="dummy-config",
         stage_init_timeout=1,
@@ -434,7 +442,7 @@ def test_initialize_local_diffusion_replica_passes_stage_init_timeout_and_inline
         "stage_id": 0,
         "stage_init_timeout": 302,
         "batch_size": 4,
-        "use_inline": False,
+        "use_inline": expected_inline,
         "omni_master_server": None,
     }
 
