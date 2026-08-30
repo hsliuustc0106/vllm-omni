@@ -9,6 +9,7 @@ import asyncio
 import base64
 import json
 import time
+from argparse import Namespace
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,7 @@ from vllm_omni.benchmarks.patch.patch import (
     _apply_stage0_token_timings,
     async_request_openai_chat_omni_completions,
     async_request_openai_realtime_duplex,
+    should_request_stage_metrics,
 )
 from vllm_omni.experimental.fullduplex.client import RealtimeEventCollector
 
@@ -272,6 +274,107 @@ def test_stage0_token_count_without_timing_is_not_measured():
 def create_sse_chunk(data_dict):
     """Helper to create SSE formatted chunk"""
     return f"data: {json.dumps(data_dict)}\n\n".encode()
+
+
+def test_chat_text_timing_metrics_request_stage_metrics():
+    args = Namespace(
+        backend="openai-chat-omni",
+        percentile_metrics="ttft,tpot,itl,e2el",
+        print_stage=False,
+        extra_body={},
+    )
+
+    assert should_request_stage_metrics(args) is True
+
+
+@pytest.mark.asyncio
+async def test_bundled_first_text_chunk_uses_stage0_token_timings(mocker: MockerFixture):
+    """Engine timings recover TPOT when every text token arrives together."""
+    request_input = RequestFuncInput(
+        model="test-model",
+        model_name="test-model",
+        prompt="test prompt",
+        api_url="http://test.com/v1/chat/completions",
+        prompt_len=10,
+        output_len=20,
+    )
+    chunks = [
+        create_sse_chunk(
+            {
+                "choices": [{"delta": {"content": "ABCD"}}],
+                "modality": "text",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+                "metrics": {
+                    "stage_metrics": {
+                        "0": {
+                            "num_tokens_out": 4,
+                            "vllm_itls_ms": [10.0, 11.0, 12.0],
+                            "vllm_tpot_ms": 11.0,
+                        }
+                    }
+                },
+            }
+        ),
+        b"data: [DONE]\n\n",
+    ]
+    mock_response = MockResponse(200, chunks)
+    mock_session = mocker.AsyncMock()
+    mock_session.post = mocker.MagicMock(return_value=mock_response)
+
+    output = await async_request_openai_chat_omni_completions(request_input, mock_session)
+
+    assert output.success is True
+    assert output.output_tokens == 4
+    assert output.itl == pytest.approx([0.010, 0.011, 0.012])
+    assert output.text_latency - output.ttft == pytest.approx(0.033)
+    assert output.tpot_measured is True
+
+
+@pytest.mark.asyncio
+async def test_positive_client_text_timings_take_precedence_over_stage0(mocker: MockerFixture):
+    request_input = RequestFuncInput(
+        model="test-model",
+        model_name="test-model",
+        prompt="test prompt",
+        api_url="http://test.com/v1/chat/completions",
+        prompt_len=10,
+        output_len=20,
+    )
+    chunks = [
+        create_sse_chunk(
+            {
+                "choices": [{"delta": {"content": "A"}}],
+                "modality": "text",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+            }
+        ),
+        create_sse_chunk(
+            {
+                "choices": [{"delta": {"content": "B"}}],
+                "modality": "text",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+                "metrics": {
+                    "stage_metrics": {
+                        "0": {
+                            "num_tokens_out": 2,
+                            "vllm_itls_ms": [1000.0],
+                            "vllm_tpot_ms": 1000.0,
+                        }
+                    }
+                },
+            }
+        ),
+        b"data: [DONE]\n\n",
+    ]
+    mock_response = MockResponse(200, chunks, delay_between_chunks=0.01)
+    mock_session = mocker.AsyncMock()
+    mock_session.post = mocker.MagicMock(return_value=mock_response)
+
+    output = await async_request_openai_chat_omni_completions(request_input, mock_session)
+
+    assert output.success is True
+    assert len(output.itl) == 1
+    assert 0.0 < output.itl[0] < 0.1
 
 
 # ============================================================================
