@@ -93,6 +93,30 @@ serving integration. Watch the contract boundaries the model documents: if a
 control input is tick-API-only, the parity pair must use a horizon both paths
 can run.
 
+For speech-generation (TTS) models, the streaming contract outranks the
+average: request the benchmark's own speech metrics — `audio_ttfp` (time to
+first packet), `audio_rtf` (real-time factor; above 1.0 cannot keep up),
+`e2el`, and `ttft`/`tpot` where tokens precede audio — over one long
+utterance (enough audio to leave warmup, tens of seconds), with per-chunk
+times and any mid-utterance stall reported, since a synthesis that pauses
+mid-stream is broken for realtime use regardless of its averages. Quality is
+a paired comparison against the reference implementation under the same
+text, speaker prompt, and seed; report sample rate and frame count, and
+assert output completeness — truncated or dropped trailing audio is a known
+failure class, not a quality nuance. For realtime or duplex TTS, add the
+interruption (barge-in) latency and the per-session memory trend across
+turns.
+
+For omni (speech-to-speech and multimodal AR) models, apply the e2e
+stage-attribution table directly to the voice-to-voice path: TTFT for text
+output, `audio_ttfp` for audio output, and per-stage ITL/TPOT cadence across
+the perception-understanding-generation chain. The omni analogue of
+realtime-versus-offline parity is cross-modal parity — the same semantic
+request through text and audio inputs, compared on output content or timing.
+For duplex omni sessions, request turn-taking latency, interruption
+handling, the concurrent session count actually validated, and a per-turn
+memory trend; session-owned KV state must not grow per turn.
+
 ## Reviewer verification ladder
 
 1. Run base/head A/B on suitable hardware when affordable.
