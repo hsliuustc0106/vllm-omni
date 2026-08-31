@@ -142,7 +142,7 @@ def _get_symm_buffer(
                 stream_id=stream_id,
             )
             _SYMM_WORKSPACES[key] = workspace
-        return workspace.handle.get_buffer(workspace.handle.rank, symm_shape, dtype)
+        return workspace.allocation[:required_bytes].view(dtype).view(symm_shape)
 
 
 def clear_a2a_permute_workspaces() -> None:
