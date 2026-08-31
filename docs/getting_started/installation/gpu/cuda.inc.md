@@ -5,7 +5,7 @@
 # --8<-- [end:requirements]
 # --8<-- [start:set-up-using-python]
 
-vLLM-Omni depends on the matching major/minor release of vLLM. The vLLM-Omni 0.26.x release line uses vLLM 0.26.x.
+vLLM-Omni depends on the matching major/minor release of vLLM. The vLLM-Omni 0.28.x release line uses vLLM 0.28.x.
 
 !!! note
     PyTorch installed via `conda` will statically link `NCCL` library, which can cause issues when vLLM tries to use `NCCL`. See <gh-issue:8420> for more details.
