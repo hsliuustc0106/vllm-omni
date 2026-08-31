@@ -95,6 +95,13 @@ uv pip install --no-build-isolation --editable .
 
 vLLM-Omni offers an official docker image for deployment. These images are built on top of vLLM docker images and available on Docker Hub as [vllm/vllm-omni](https://hub.docker.com/r/vllm/vllm-omni/tags). The version of vLLM-Omni indicates which release of vLLM it is based on.
 
+Nightly CUDA images built from the latest `main` are also available:
+
+- [`vllm/vllm-omni:nightly`](https://hub.docker.com/r/vllm/vllm-omni/tags?name=nightly) is the rolling multi-architecture tag.
+- [`vllm/vllm-omni:nightly-<commit>`](https://hub.docker.com/r/vllm/vllm-omni/tags?name=nightly-) provides commit-pinned multi-architecture tags. The newest 14 are retained.
+
+Use a commit-pinned tag when you need a reproducible nightly environment.
+
 Here's an example deployment command that has been verified on 2 x H100's:
 ```bash
 docker run --runtime nvidia --gpus 2 \
