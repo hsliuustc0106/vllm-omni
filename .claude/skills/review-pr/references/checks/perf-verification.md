@@ -72,50 +72,74 @@ Component-level tables pair with, not replace, the e2e table: per-op reference
 vs candidate timings (with the numerical-equality result per op) plus one
 complete-pipeline check under the production shapes.
 
-Proportionality: when a PR adds a model and explicitly labels its numbers as
-smoke observations rather than claims, do not demand the attribution
-machinery. Ask only for evidence protecting the model's stated operating
-contract — for a realtime/duplex model that is sustained cadence over a
-realistic session (enough ticks to leave warmup), with any mid-session
-capture/regeneration event and its stall reported, since a cadence that
-collapses mid-session is a functional failure, not a perf claim.
+## Proportionality
 
-For realtime/duplex world models, request the operating-contract evidence as
-serving metrics, not claims: sustained per-tick latency over one realistic
-session (median, max, and the argmax tick), stall events with their causes,
-peak memory at first versus last tick (session-owned state must not grow per
-tick), control latency from a submitted action to the tick that applies it,
-and realtime-versus-offline parity under the same controls using the
-repository's video-similarity helpers. Parity plotted over tick index is the
-drift-over-horizon curve and the honest measure of session lifetime;
-distribution-level suites (FVD, VBench) belong to model evaluation, not the
-serving integration. Watch the contract boundaries the model documents: if a
-control input is tick-API-only, the parity pair must use a horizon both paths
-can run.
+When a PR adds a model and explicitly labels its numbers as smoke observations
+rather than claims, do not demand the attribution machinery. Ask only for
+evidence protecting the model's stated operating contract — for a
+realtime/duplex model that is sustained cadence over a realistic session
+(enough ticks to leave warmup), with any mid-session capture/regeneration
+event and its stall reported, since a cadence that collapses mid-session is a
+functional failure, not a perf claim.
 
-For speech-generation (TTS) models, the streaming contract outranks the
-average: request the benchmark's own speech metrics — `audio_ttfp` (time to
-first packet), `audio_rtf` (real-time factor; above 1.0 cannot keep up),
-`e2el`, and `ttft`/`tpot` where tokens precede audio — over one long
-utterance (enough audio to leave warmup, tens of seconds), with per-chunk
-times and any mid-utterance stall reported, since a synthesis that pauses
-mid-stream is broken for realtime use regardless of its averages. Quality is
-a paired comparison against the reference implementation under the same
-text, speaker prompt, and seed; report sample rate and frame count, and
-assert output completeness — truncated or dropped trailing audio is a known
-failure class, not a quality nuance. For realtime or duplex TTS, add the
-interruption (barge-in) latency and the per-session memory trend across
-turns.
+## Realtime/duplex world models
 
-For omni (speech-to-speech and multimodal AR) models, apply the e2e
-stage-attribution table directly to the voice-to-voice path: TTFT for text
-output, `audio_ttfp` for audio output, and per-stage ITL/TPOT cadence across
-the perception-understanding-generation chain. The omni analogue of
-realtime-versus-offline parity is cross-modal parity — the same semantic
-request through text and audio inputs, compared on output content or timing.
-For duplex omni sessions, request turn-taking latency, interruption
-handling, the concurrent session count actually validated, and a per-turn
-memory trend; session-owned KV state must not grow per turn.
+Request the operating-contract evidence as serving metrics, not claims:
+
+- Sustained per-tick latency over one realistic session: median, max, and the
+  argmax tick.
+- Stall events with their causes.
+- Peak memory at first versus last tick — session-owned state must not grow
+  per tick.
+- Control latency from a submitted action to the tick that applies it.
+- Realtime-versus-offline parity under the same controls, using the
+  repository's video-similarity helpers. Parity plotted over tick index is the
+  drift-over-horizon curve and the honest measure of session lifetime;
+  distribution-level suites (FVD, VBench) belong to model evaluation, not the
+  serving integration.
+
+Watch the contract boundaries the model documents: if a control input is
+tick-API-only, the parity pair must use a horizon both paths can run.
+
+## Speech-generation (TTS) models
+
+The streaming contract outranks the average — a synthesis that pauses
+mid-stream is broken for realtime use regardless of its averages. Request:
+
+- The benchmark's own speech metrics over one long utterance (enough audio to
+  leave warmup, tens of seconds): `audio_ttfp` (time to first packet),
+  `audio_rtf` (real-time factor; above 1.0 cannot keep up), `e2el`, and
+  `ttft`/`tpot` where tokens precede audio.
+- Mid-utterance stalls as the benchmark's continuity fields, not prose:
+  `audio_underrun` percentiles and the `audio_continuity_ok` rate
+  (`vllm_omni/benchmarks/metrics/metrics.py`), computed by
+  `vllm_omni/benchmarks/audio_continuity.py` — the companion to `audio_ttfp`
+  and `audio_rtf`. A synthesis that bursts chunks fast enough on average but
+  underruns mid-stream fails the streaming contract even when the averages
+  pass.
+- Quality as a paired comparison against the reference implementation under
+  the same text, speaker prompt, and seed; report sample rate and frame
+  count, and assert output completeness — truncated or dropped trailing audio
+  is a known failure class, not a quality nuance.
+- For realtime or duplex TTS: interruption (barge-in) latency and the
+  per-session memory trend across turns.
+
+## Omni models
+
+Apply the e2e stage-attribution table directly to the voice-to-voice path of
+omni (speech-to-speech and multimodal AR) models:
+
+- TTFT for text output, `audio_ttfp` for audio output, and per-stage
+  ITL/TPOT cadence across the perception-understanding-generation chain.
+- Cross-modal parity — the omni analogue of realtime-versus-offline parity:
+  the same semantic request through text and audio inputs, compared on output
+  content or timing.
+- For duplex omni sessions: turn-taking latency, interruption handling, the
+  concurrent session count actually validated, and a per-turn memory trend —
+  session-owned KV state must not grow per turn. When either turn produces
+  audio, continuity is judged with the same `audio_underrun` and
+  `audio_continuity_ok` fields as TTS, since turn-taking latency alone does
+  not expose mid-utterance underruns.
 
 ## Reviewer verification ladder
 

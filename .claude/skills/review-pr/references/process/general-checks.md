@@ -128,6 +128,12 @@ full files (for example `git diff <sha1>:<path> <sha2>:<path>` or the contents
 API's size and SHA fields) before anchoring the finding. A verification
 shortcut that would itself be wrong to run is not evidence.
 
+For a value written or finalized in more than one place, establish which site
+executes first on each entry path — and whether the earlier site makes the
+later ones unreachable — before naming where a fix belongs. Enumerating all
+call sites correctly still misses the bug when a path the enumeration ranked
+last actually finalizes first and clears the state the proposed fix checks.
+
 ## Finding bar
 
 Anchor each finding to a changed `path:line`; name the trigger or call path,
