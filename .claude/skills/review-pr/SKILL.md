@@ -125,8 +125,12 @@ For a trusted PR head, materialize the pinned head in an isolated detached
 worktree. A worktree freezes identity but is not a security sandbox. Treat fork
 heads as untrusted unless the user and environment policy explicitly establish
 otherwise: execute them only in a disposable, secret-free sandbox with restricted
-filesystem, network, and resources; without one, use static SHA-addressed reads
-and CI evidence only. For a local review, freeze the committed, index, worktree,
+filesystem, network, and resources; on a host that cannot provide that
+isolation (for example, namespaces disabled), direct execution is allowed only
+after the user explicitly trusts the pinned commit for this host — record the
+trusted SHA and still keep secrets out of the execution scope; without a
+sandbox or that explicit trust, use static SHA-addressed reads and CI evidence
+only. For a local review, freeze the committed, index, worktree,
 and NUL-safe in-scope untracked contents. Follow
 [review-execution.md](references/process/review-execution.md) for trust gates,
 state fingerprints, and byte-for-byte staleness checks.

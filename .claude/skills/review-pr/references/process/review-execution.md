@@ -45,7 +45,12 @@ repo-configurable linters/plugins on the reviewer host. Execute them only in a
 disposable sandbox or VM with no credentials or inherited secrets, no host agent
 or service sockets, minimal read-only host mounts, disabled or explicitly
 allowlisted network, resource/time limits, and destruction after the run. If
-that boundary is unavailable, limit the review to the remote diff, SHA-addressed
+that boundary is unavailable — some hosts disable the namespaces sandboxes
+need — direct execution on the reviewer host is allowed only when the user
+explicitly trusts this pinned commit for this host: record the trusted SHA
+with the review state and still run with credentials, agent sockets, and
+other secrets out of scope. Without a sandbox or that explicit trust, limit
+the review to the remote diff, SHA-addressed
 reads such as `git show <head_sha>:<path>`, and existing CI evidence; report all
 executable validation as a gap.
 
