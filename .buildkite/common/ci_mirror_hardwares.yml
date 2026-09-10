@@ -28,6 +28,9 @@
 # packed onto g6.12xlarge L4 nodes (``vllm.ci/gpu-pool=l4x4``). GPU / CPU /
 # memory / shm requests scale with card count (1 GPU = 10 CPU / 40Gi / 24Gi shm).
 # Retry covers lost agents / killed pods, not pytest or OOM (exit 1 / 137).
+# The Kubernetes HF secret deliberately uses VLLM_CI_HF_TOKEN. Scheduled
+# build-level HF_TOKEN values can override pod env entries with the same name;
+# upload_pipeline.py restores the secret-backed value inside the job shell.
 
 x-npu-k8s-plugins: &npu_k8s_plugins
   - kubernetes:
@@ -86,7 +89,7 @@ mirror_hardwares:
                 env:
                   - name: HF_HOME
                     value: /fsx/hf_cache
-                  - name: HF_TOKEN
+                  - name: VLLM_CI_HF_TOKEN
                     valueFrom:
                       secretKeyRef:
                         name: hf-token-secret
@@ -137,7 +140,7 @@ mirror_hardwares:
                 env:
                   - name: HF_HOME
                     value: /fsx/hf_cache
-                  - name: HF_TOKEN
+                  - name: VLLM_CI_HF_TOKEN
                     valueFrom:
                       secretKeyRef:
                         name: hf-token-secret
@@ -188,7 +191,7 @@ mirror_hardwares:
                 env:
                   - name: HF_HOME
                     value: /fsx/hf_cache
-                  - name: HF_TOKEN
+                  - name: VLLM_CI_HF_TOKEN
                     valueFrom:
                       secretKeyRef:
                         name: hf-token-secret
@@ -239,7 +242,7 @@ mirror_hardwares:
                 env:
                   - name: HF_HOME
                     value: /fsx/hf_cache
-                  - name: HF_TOKEN
+                  - name: VLLM_CI_HF_TOKEN
                     valueFrom:
                       secretKeyRef:
                         name: hf-token-secret
@@ -273,7 +276,7 @@ mirror_hardwares:
                 env:
                   - name: HF_HOME
                     value: /root/.cache/huggingface
-                  - name: HF_TOKEN
+                  - name: VLLM_CI_HF_TOKEN
                     valueFrom:
                       secretKeyRef:
                         name: hf-token-secret
@@ -308,7 +311,7 @@ mirror_hardwares:
                 env:
                   - name: HF_HOME
                     value: /root/.cache/huggingface
-                  - name: HF_TOKEN
+                  - name: VLLM_CI_HF_TOKEN
                     valueFrom:
                       secretKeyRef:
                         name: hf-token-secret
@@ -343,7 +346,7 @@ mirror_hardwares:
                 env:
                   - name: HF_HOME
                     value: /root/.cache/huggingface
-                  - name: HF_TOKEN
+                  - name: VLLM_CI_HF_TOKEN
                     valueFrom:
                       secretKeyRef:
                         name: hf-token-secret
@@ -378,7 +381,7 @@ mirror_hardwares:
                 env:
                   - name: HF_HOME
                     value: /root/.cache/huggingface
-                  - name: HF_TOKEN
+                  - name: VLLM_CI_HF_TOKEN
                     valueFrom:
                       secretKeyRef:
                         name: hf-token-secret
@@ -428,7 +431,7 @@ mirror_hardwares:
                     value: "0"
                   - name: HF_HOME
                     value: /raid/hf_cache
-                  - name: HF_TOKEN
+                  - name: VLLM_CI_HF_TOKEN
                     valueFrom:
                       secretKeyRef:
                         name: hf-token-secret
@@ -479,7 +482,7 @@ mirror_hardwares:
                     value: "0"
                   - name: HF_HOME
                     value: /raid/hf_cache
-                  - name: HF_TOKEN
+                  - name: VLLM_CI_HF_TOKEN
                     valueFrom:
                       secretKeyRef:
                         name: hf-token-secret
@@ -530,7 +533,7 @@ mirror_hardwares:
                     value: "0"
                   - name: HF_HOME
                     value: /raid/hf_cache
-                  - name: HF_TOKEN
+                  - name: VLLM_CI_HF_TOKEN
                     valueFrom:
                       secretKeyRef:
                         name: hf-token-secret
@@ -581,7 +584,7 @@ mirror_hardwares:
                     value: "0"
                   - name: HF_HOME
                     value: /raid/hf_cache
-                  - name: HF_TOKEN
+                  - name: VLLM_CI_HF_TOKEN
                     valueFrom:
                       secretKeyRef:
                         name: hf-token-secret
