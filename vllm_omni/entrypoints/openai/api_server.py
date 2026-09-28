@@ -3018,9 +3018,13 @@ async def omni_sleep(request: OmniSleepRequest, raw_request: Request):
     sleeping_set = raw_request.app.state.sleeping_stages
     if not hasattr(engine_client, "sleep"):
         raise HTTPException(status_code=501, detail="Engine does not support sleep")
-    acks = await engine_client.sleep(stage_ids=request.stage_ids, level=request.level)
-    for sid in request.stage_ids:
-        sleeping_set.add(sid)
+    try:
+        acks = await engine_client.sleep(stage_ids=request.stage_ids, level=request.level)
+    except RuntimeError as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=f"Failed to sleep: {e}") from e
+    finally:
+        # Mirror the engine: a failed sleep may still leave stages for wakeup to reach.
+        sleeping_set.update([sid for sid in request.stage_ids if await engine_client.is_sleeping(stage_ids=[sid])])
     return {
         "status": "SUCCESS",
         "acks": [dataclasses.asdict(a) if dataclasses.is_dataclass(a) and not isinstance(a, type) else a for a in acks],
@@ -3036,7 +3040,12 @@ async def omni_wakeup(request: OmniWakeupRequest, raw_request: Request):
         return {"status": "SKIPPED", "reason": "Target stages are not sleeping."}
     if not hasattr(engine_client, "wake_up"):
         raise HTTPException(status_code=501, detail="Engine does not support wake_up")
-    acks = await engine_client.wake_up(stage_ids=request.stage_ids)
+    try:
+        acks = await engine_client.wake_up(stage_ids=request.stage_ids)
+    except NotImplementedError:
+        raise
+    except RuntimeError as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=f"Failed to wake up: {e}") from e
     for sid in request.stage_ids:
         if sid in sleeping_set:
             sleeping_set.remove(sid)

@@ -32,6 +32,7 @@ def sleep_capable_engine(mocker):
     engine = mocker.MagicMock()
     engine.sleep = mocker.AsyncMock(return_value=[FakeAck(stage_id=0), FakeAck(stage_id=1)])
     engine.wake_up = mocker.AsyncMock(return_value=[FakeAck(stage_id=0), FakeAck(stage_id=1)])
+    engine.is_sleeping = mocker.AsyncMock(return_value=True)
     return engine
 
 
@@ -88,6 +89,46 @@ def test_sleep_updates_sleeping_set(sleep_capable_engine):
     client.post("/v1/omni/sleep", json={"stage_ids": [0, 1], "level": 2})
 
     assert app.state.sleeping_stages == {5, 0, 1}
+
+
+def test_sleep_failure_keeps_stages_for_wakeup(sleep_capable_engine, mocker):
+    sleep_capable_engine.sleep = mocker.AsyncMock(side_effect=RuntimeError("handle_sleep_task failed: out of memory"))
+    app = _make_app(sleep_capable_engine)
+    client = TestClient(app)
+
+    response = client.post("/v1/omni/sleep", json={"stage_ids": [0], "level": 1})
+
+    assert response.status_code == 500
+    assert "handle_sleep_task failed: out of memory" in response.json()["detail"]
+    # The stage may be partly asleep, so /v1/omni/wakeup must still reach it.
+    assert app.state.sleeping_stages == {0}
+    response = client.post("/v1/omni/wakeup", json={"stage_ids": [0]})
+    assert response.status_code == 200
+    sleep_capable_engine.wake_up.assert_awaited_once_with(stage_ids=[0])
+
+
+def test_sleep_failure_marks_only_stages_the_engine_recorded(sleep_capable_engine, mocker):
+    sleep_capable_engine.sleep = mocker.AsyncMock(side_effect=RuntimeError("sleep failed: out of memory"))
+    sleep_capable_engine.is_sleeping = mocker.AsyncMock(side_effect=lambda stage_ids: stage_ids == [1])
+    app = _make_app(sleep_capable_engine)
+    client = TestClient(app)
+
+    response = client.post("/v1/omni/sleep", json={"stage_ids": [0, 1], "level": 1})
+
+    assert response.status_code == 500
+    assert app.state.sleeping_stages == {1}
+
+
+def test_sleep_client_error_does_not_mark_stages(sleep_capable_engine, mocker):
+    sleep_capable_engine.sleep = mocker.AsyncMock(side_effect=ValueError("unknown stage id 9"))
+    sleep_capable_engine.is_sleeping = mocker.AsyncMock(return_value=False)
+    app = _make_app(sleep_capable_engine)
+    client = TestClient(app)
+
+    with pytest.raises(ValueError, match="unknown stage id 9"):
+        client.post("/v1/omni/sleep", json={"stage_ids": [9], "level": 1})
+
+    assert app.state.sleeping_stages == set()
 
 
 def test_sleep_engine_not_support(sleep_incapable_engine):
@@ -159,6 +200,19 @@ def test_wakeup_empty_stage_ids(sleep_capable_engine):
     sleep_capable_engine.wake_up.assert_not_awaited()
 
 
+def test_wakeup_failure_returns_error_and_keeps_sleeping_set(sleep_capable_engine, mocker):
+    sleep_capable_engine.wake_up = mocker.AsyncMock(side_effect=RuntimeError("handle_wake_task failed: out of memory"))
+    app = _make_app(sleep_capable_engine)
+    app.state.sleeping_stages = {0}
+    client = TestClient(app)
+
+    response = client.post("/v1/omni/wakeup", json={"stage_ids": [0]})
+
+    assert response.status_code == 500
+    assert "handle_wake_task failed: out of memory" in response.json()["detail"]
+    assert app.state.sleeping_stages == {0}
+
+
 def test_wakeup_engine_not_support(sleep_incapable_engine):
     app = _make_app(sleep_incapable_engine)
     app.state.sleeping_stages = {0}
@@ -224,6 +278,7 @@ def pure_diffusion_engine(mocker):
     engine.stage_configs = [{"stage_type": "diffusion"}]
     engine.sleep = mocker.AsyncMock(return_value=[FakeAck(stage_id=0)])
     engine.wake_up = mocker.AsyncMock(return_value=[FakeAck(stage_id=0)])
+    engine.is_sleeping = mocker.AsyncMock(return_value=True)
     # Remove attributes that would make _get_vllm_config return a config
     del engine.get_vllm_config
     del engine.vllm_config
