@@ -5,6 +5,10 @@
 # frame — same per-frame timing (80 ms/frame, 12.5 fps) as MOSS-TTS-Realtime.
 async_chunk: true
 
+speech_cache:
+  resolve_max_bytes: 2147483648  # 2 GiB
+  resolve_max_entries: 2048
+
 connectors:
   shm:
     name: SharedMemoryConnector
