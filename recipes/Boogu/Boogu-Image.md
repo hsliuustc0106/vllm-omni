@@ -111,9 +111,11 @@ curl -s http://localhost:8091/v1/chat/completions \
   active whenever `guidance_scale > 1.0`.
 - **Recommended settings:** `num_inference_steps=28`-`50`, `guidance_scale=4.0`.
   The model's maximum native resolution is 2K.
+- **Multi-GPU:** sequence parallelism (SP) and CFG parallel are validated —
+  see the sections below. TP and HSDP parallelism remain unsupported.
 - **Known limitations (not yet supported):** CPU offload
   (`--enable-cpu-offload` / `--enable-layerwise-offload`), Cache-DiT
-  (`--cache-backend cache_dit`), and TP / SP / HSDP multi-GPU parallelism.
+  (`--cache-backend cache_dit`), and TP / HSDP multi-GPU parallelism.
 
 ### 2 x H100 (CFG parallel, Base T2I)
 
@@ -295,8 +297,10 @@ curl -X POST http://localhost:8091/v1/images/generations \
 - **Resolution:** upstream constrains Turbo to 1K, so `1024x1024` is the
   supported working resolution. The shared pipeline still clamps at 2K; larger
   sizes are not validated for this checkpoint.
+- **Multi-GPU:** SP and CFG parallel apply to Edit the same as Base (see the
+  sections below).
 - **Known limitations:** the same single-GPU limitations as Base apply; CPU
-  offload, Cache-DiT, and multi-GPU parallelism are not yet validated.
+  offload, Cache-DiT, and TP / HSDP parallelism are not yet validated.
 
 ## Image editing (Boogu-Image-0.1-Edit)
 
@@ -522,7 +526,9 @@ curl -s http://localhost:8091/v1/chat/completions \
 - **Reference images:** the same single-reference and `align_res` behavior as
   the regular Edit checkpoint applies.
 - **Known limitations:** the same single-GPU limitations as Base and Edit apply;
-  CPU offload, Cache-DiT, and multi-GPU parallelism are not yet validated.
+  CPU offload, Cache-DiT, and TP / HSDP parallelism are not yet validated.
+  SP is validated for Base and Edit; the Turbo DMD loop under SP has not been
+  measured, so treat SP for this checkpoint as untested.
 
 ## Output format and compression
 
@@ -556,6 +562,35 @@ different from FLASH_ATTN (different attention kernel) but visually
 equivalent, deterministic per seed, and decode identically. On datacenter
 Blackwell (SM100 / SM103) use `--diffusion-attention-backend TRTLLM_ATTN`
 instead; it is rejected on SM90.
+
+## Sequence parallelism (SP)
+
+SP shards the model's three token streams (noise image, reference images, and
+instruction context) across GPUs at a single boundary, using Ulysses
+attention in `advanced_uaa` mode. It is validated for Base and Edit on CUDA,
+requires the `CUDNN_ATTN` or `FLASH_ATTN` attention backend, and is not
+validated in combination with CFG parallel.
+
+```bash
+# Multi-GPU SP for Base (Edit is identical with --task-type / the Edit checkpoint)
+vllm serve Boogu/Boogu-Image-0.1-Base \
+  --omni \
+  --port 8091 \
+  --diffusion-attention-backend CUDNN_ATTN \
+  --ulysses-degree 2
+```
+
+Measured on 4x H800 (1024x1024, 30 steps, mean of 3; `advanced_uaa`):
+
+| checkpoint | SP1 | SP2 | SP4 |
+| --- | ---: | ---: | ---: |
+| Base (T2I) | 4.21 s | 2.72 s (1.55x) | 2.42 s (1.74x) |
+| Edit (I2I) | 9.23 s | 6.71 s (1.38x) | 4.73 s (1.95x) |
+
+`--ulysses-degree` must divide the padded head count (the `advanced_uaa`
+default handles non-divisible head counts); SP=1 with this PR is
+pixel-identical to main. SP is CUDA-only and has not been measured for the
+Turbo DMD checkpoint.
 
 ## Performance validation
 
