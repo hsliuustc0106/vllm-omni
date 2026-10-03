@@ -111,8 +111,10 @@ curl -s http://localhost:8091/v1/chat/completions \
   active whenever `guidance_scale > 1.0`.
 - **Recommended settings:** `num_inference_steps=28`-`50`, `guidance_scale=4.0`.
   The model's maximum native resolution is 2K.
-- **Multi-GPU:** sequence parallelism (SP) and CFG parallel are validated —
-  see the sections below. TP and HSDP parallelism remain unsupported.
+- **Multi-GPU:** sequence parallelism (SP) and CFG parallel are each
+  validated — see the sections below. They are mutually exclusive (SP combined
+  with CFG parallel is rejected at startup). TP and HSDP parallelism remain
+  unsupported.
 - **Known limitations (not yet supported):** CPU offload
   (`--enable-cpu-offload` / `--enable-layerwise-offload`), Cache-DiT
   (`--cache-backend cache_dit`), and TP / HSDP multi-GPU parallelism.
@@ -297,10 +299,13 @@ curl -X POST http://localhost:8091/v1/images/generations \
 - **Resolution:** upstream constrains Turbo to 1K, so `1024x1024` is the
   supported working resolution. The shared pipeline still clamps at 2K; larger
   sizes are not validated for this checkpoint.
-- **Multi-GPU:** SP and CFG parallel apply to Edit the same as Base (see the
-  sections below).
+- **Multi-GPU:** not validated for this checkpoint — the Turbo DMD loop under
+  sequence parallelism has not been measured, and CFG parallel does not apply
+  (Turbo is guidance-distilled and enforces `guidance_scale=1.0`, i.e. the
+  CFG-off path with no CFG branches to parallelize).
 - **Known limitations:** the same single-GPU limitations as Base apply; CPU
-  offload, Cache-DiT, and TP / HSDP parallelism are not yet validated.
+  offload, Cache-DiT, TP / HSDP parallelism, SP, and CFG parallel are not
+  validated for this checkpoint.
 
 ## Image editing (Boogu-Image-0.1-Edit)
 
@@ -393,6 +398,8 @@ curl -s http://localhost:8091/v1/chat/completions \
     default `1.0` = off). Setting it `> 1.0` enables the double-guidance path
     (3 model predictions per step), steering more strongly toward the reference
     image.
+- **Multi-GPU:** SP and CFG parallel apply to Edit the same as Base (see the
+  sections below).
 - **CFG-size recommendations:**
 
   | Request mode | Scales | Predictions per step | Recommended CFG size |
@@ -567,9 +574,11 @@ instead; it is rejected on SM90.
 
 SP shards the model's three token streams (noise image, reference images, and
 instruction context) across GPUs at a single boundary, using Ulysses
-attention in `advanced_uaa` mode. It is validated for Base and Edit on CUDA,
-requires the `CUDNN_ATTN` or `FLASH_ATTN` attention backend, and is not
-validated in combination with CFG parallel.
+attention in `advanced_uaa` mode. Pass `--ulysses-mode advanced_uaa`
+explicitly: the CLI default is `strict`, which routes differently from the
+validated configuration. SP is validated for Base and Edit on CUDA, requires
+the `CUDNN_ATTN` or `FLASH_ATTN` attention backend, and is not validated in
+combination with CFG parallel.
 
 ```bash
 # Multi-GPU SP for Base (Edit is identical with --task-type / the Edit checkpoint)
@@ -577,6 +586,7 @@ vllm serve Boogu/Boogu-Image-0.1-Base \
   --omni \
   --port 8091 \
   --diffusion-attention-backend CUDNN_ATTN \
+  --ulysses-mode advanced_uaa \
   --ulysses-degree 2
 ```
 
@@ -590,7 +600,8 @@ Measured on 4x H800 (1024x1024, 30 steps, mean of 3; `advanced_uaa`):
 `--ulysses-degree` must divide the padded head count (the `advanced_uaa`
 default handles non-divisible head counts); SP=1 with this PR is
 pixel-identical to main. SP is CUDA-only and has not been measured for the
-Turbo DMD checkpoint.
+Turbo DMD checkpoint. The table above quotes the #5718 validation run
+(H800); it is not a checked-in perf baseline.
 
 ## Performance validation
 
